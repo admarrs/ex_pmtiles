@@ -81,7 +81,7 @@ stats = ExPmtiles.Cache.get_stats(cache_pid)
 
 ### Core Functions
 
-#### `ExPmtiles.new/2` and `ExPmtiles.new/3`
+#### `ExPmtiles.new/2` and `ExPmtiles.new/4`
 
 Create a new PMTiles instance:
 

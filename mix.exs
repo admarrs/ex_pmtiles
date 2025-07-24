@@ -7,7 +7,7 @@ defmodule ExPmtiles.MixProject do
   def project do
     [
       app: :ex_pmtiles,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.17",
       name: "ExPmtiles",
       source_url: @source_url,

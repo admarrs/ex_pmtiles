@@ -21,7 +21,7 @@ defmodule ExPmtiles do
   instance = ExPmtiles.new("path/to/file.pmtiles", :local)
 
   # Open a PMTiles file from S3
-  instance = ExPmtiles.new("my-bucket", "path/to/file.pmtiles", :s3)
+  instance = ExPmtiles.new("region", "my-bucket", "path/to/file.pmtiles", :s3)
 
   # Get a tile by coordinates
   case ExPmtiles.get_zxy(instance, 10, 512, 256) do
