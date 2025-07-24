@@ -14,7 +14,15 @@ defmodule ExPmtiles.MixProject do
       package: package(),
       deps: deps(),
       docs: docs(),
-      start_permanent: Mix.env() == :prod
+      start_permanent: Mix.env() == :prod,
+      test_coverage: [tool: ExCoveralls],
+      preferred_cli_env: [
+        coveralls: :test,
+        "coveralls.detail": :test,
+        "coveralls.post": :test,
+        "coveralls.html": :test,
+        "coveralls.cobertura": :test
+      ]
     ]
   end
 
@@ -32,7 +40,9 @@ defmodule ExPmtiles.MixProject do
       {:ex_aws_s3, "~> 2.0"},
 
       # test deps
+      {:excoveralls, "~> 0.18", only: :test},
       {:mox, "~> 1.0", only: :test},
+
       # dev & test deps
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false, warn_if_outdated: true}
