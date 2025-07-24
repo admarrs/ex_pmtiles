@@ -1,13 +1,18 @@
 defmodule ExPmtiles.MixProject do
   use Mix.Project
 
+  @source_url "https://github.com/almarrs/ex_pmtiles"
+  @version "0.1.0"
+
   def project do
     [
       app: :ex_pmtiles,
       version: "0.1.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      package: package(),
+      docs: docs()
     ]
   end
 
@@ -26,7 +31,39 @@ defmodule ExPmtiles.MixProject do
 
       # test deps
       {:mox, "~> 1.0", only: :test},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      # dev & test deps
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false, warn_if_outdated: true}
+    ]
+  end
+
+  defp package do
+    [
+      description: description(),
+      files: ["lib", "mix.exs", "README*", "LICENSE", "CHANGELOG.md"],
+      exclude_patterns: ["_build", "deps", "test", "*~"],
+      maintainers: ["Alan Marrs"],
+      licenses: ["MIT"],
+      links: %{
+        Changelog: "#{@source_url}/blob/master/CHANGELOG.md",
+        GitHub: @source_url
+      },
+      exclude_patterns: [~r/.*~/]
+    ]
+  end
+
+  defp description do
+    """
+    Elixir library for working with PMTiles files - a single-file format for storing tiled map data.
+    """
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      source_ref: "v#{@version}",
+      source_url: @source_url,
+      extras: ["README.md"]
     ]
   end
 end
