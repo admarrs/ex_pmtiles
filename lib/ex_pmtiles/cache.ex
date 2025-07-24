@@ -105,7 +105,7 @@ defmodule ExPmtiles.Cache do
 
   ## Examples
 
-      iex> ExPmtiles.Cache.start_link(bucket: "maps", path: "world.pmtiles")
+      iex> ExPmtiles.Cache.start_link(region: nil, bucket: "maps", path: "world.pmtiles")
       {:ok, #PID<0.123.0>}
 
       iex> ExPmtiles.Cache.start_link(bucket: nil, path: "/data/local.pmtiles")
@@ -115,10 +115,11 @@ defmodule ExPmtiles.Cache do
       {:ok, #PID<0.125.0>}
   """
   def start_link(opts \\ []) do
+    region = Keyword.get(opts, :region)
     bucket = Keyword.get(opts, :bucket)
     path = Keyword.get(opts, :path)
     storage = Keyword.get(opts, :storage, :s3)
-    GenServer.start_link(__MODULE__, {bucket, path, storage, opts}, name: name_for(bucket, path))
+    GenServer.start_link(__MODULE__, {region, bucket, path, storage, opts}, name: name_for(bucket, path))
   end
 
   @doc """
@@ -129,7 +130,7 @@ defmodule ExPmtiles.Cache do
 
   ## Parameters
 
-  - `{bucket, path}` - Tuple identifying the PMTiles file
+  - `{bucket, path}` - Tuple identifying the PMTiles file or `pid` identifying the cache process
   - `z` - Zoom level (integer)
   - `x` - X coordinate (integer)
   - `y` - Y coordinate (integer)
@@ -147,6 +148,9 @@ defmodule ExPmtiles.Cache do
 
       iex> ExPmtiles.Cache.get_tile({"maps", "world.pmtiles"}, 25, 0, 0)
       {:error, :tile_not_found}
+
+      iex> ExPmtiles.Cache.get_tile(pid, 10, 512, 256)
+      {:ok, <<...>>}
   """
   def get_tile({bucket, path}, z, x, y) do
     request_id = System.unique_integer([:positive])
@@ -169,33 +173,6 @@ defmodule ExPmtiles.Cache do
     end
   end
 
-  @doc """
-  Retrieves a tile from the cache by process ID.
-
-  Alternative interface that uses the cache process PID directly instead of
-  the bucket/path tuple.
-
-  ## Parameters
-
-  - `pid` - The cache process PID
-  - `z` - Zoom level (integer)
-  - `x` - X coordinate (integer)
-  - `y` - Y coordinate (integer)
-
-  ## Returns
-
-  - `tile_data` - Tile data as binary (on success)
-  - `nil` - If tile not found or error occurred
-
-  ## Examples
-
-      iex> {:ok, pid} = ExPmtiles.Cache.start_link(bucket: "maps", path: "world.pmtiles")
-      iex> ExPmtiles.Cache.get_tile(pid, 10, 512, 256)
-      <<...>>
-
-      iex> ExPmtiles.Cache.get_tile(pid, 25, 0, 0)
-      nil
-  """
   def get_tile(pid, z, x, y) do
     case GenServer.call(pid, {:get_tile, z, x, y}, :infinity) do
       {:ok, tile_data} ->
@@ -236,8 +213,8 @@ defmodule ExPmtiles.Cache do
 
   # Server callbacks
   @impl true
-  def init({bucket, path, storage, opts}) do
-    case initialize_pmtiles(bucket, path, storage) do
+  def init({region, bucket, path, storage, opts}) do
+    case initialize_pmtiles(region, bucket, path, storage) do
       nil -> {:stop, :pmtiles_not_found}
       pmtiles -> setup_cache_server(pmtiles, bucket, path, opts)
     end
@@ -563,8 +540,8 @@ defmodule ExPmtiles.Cache do
     {:reply, {:ok, tile_data}, %{state | pmtiles: updated_pmtiles}}
   end
 
-  defp initialize_pmtiles(bucket, path, storage) do
-    pmtiles_module().new(bucket, path, storage)
+  defp initialize_pmtiles(region, bucket, path, storage) do
+    pmtiles_module().new(region, bucket, path, storage)
   end
 
   defp setup_cache_server(pmtiles, bucket, path, opts) do

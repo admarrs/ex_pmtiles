@@ -90,7 +90,7 @@ defmodule ExPmtiles.Storage do
              hackney: [pool: :s3_pool]
            ]
          )
-         |> ExAws.request() do
+         |> request(instance.region) do
       {:ok, %{body: body}} ->
         body
 
@@ -99,6 +99,9 @@ defmodule ExPmtiles.Storage do
         nil
     end
   end
+
+  defp request(op, nil), do: ExAws.request(op)
+  defp request(op, region), do: ExAws.request(op, region: region)
 
   defp get_from_local(instance, offset, length) do
     path = instance.path

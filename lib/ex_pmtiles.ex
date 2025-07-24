@@ -85,7 +85,7 @@ defmodule ExPmtiles do
     5 => :avif
   }
 
-  defstruct [:header, :bucket, :path, :source, directories: %{}, pending_directories: %{}]
+  defstruct [:header, :region, :bucket, :path, :source, directories: %{}, pending_directories: %{}]
 
   @tz_values %{
     0 => 0,
@@ -136,8 +136,8 @@ defmodule ExPmtiles do
       iex> ExPmtiles.new("my-bucket", "maps/world.pmtiles", :s3)
       %ExPmtiles{bucket: "my-bucket", path: "maps/world.pmtiles", source: :s3, header: %{...}}
   """
-  def new(bucket, path, :s3) do
-    instance = %ExPmtiles{bucket: bucket, path: path, source: :s3}
+  def new(region, bucket, path, :s3) do
+    instance = %ExPmtiles{region: region, bucket: bucket, path: path, source: :s3}
 
     case get_bytes(instance, 0, 16_384) do
       nil ->

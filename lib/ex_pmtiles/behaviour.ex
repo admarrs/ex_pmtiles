@@ -3,7 +3,7 @@ defmodule ExPmtiles.Behaviour do
   A behaviour module for PMTiles files. Primarily to support Mox testing.
   """
   # coveralls-ignore-start
-  @callback new(String.t(), String.t(), atom()) :: map()
+  @callback new(String.t(), String.t(), String.t(), atom()) :: map()
   @callback new(String.t(), atom()) :: map()
   @callback get_tile(map(), integer(), integer()) :: binary() | nil
   @callback get_zxy(map(), integer(), integer(), integer()) ::

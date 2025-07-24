@@ -25,8 +25,8 @@ defmodule ExPmtiles.CacheTest do
     # Add this line to make mocks global
     Mox.set_mox_global()
 
-    stub(CacheMock, :new, fn bucket, path, storage ->
-      %{bucket: bucket, path: path, storage: storage}
+    stub(CacheMock, :new, fn region, bucket, path, storage ->
+      %{region: region, bucket: bucket, path: path, storage: storage}
     end)
 
     stub(CacheMock, :get_zxy, fn _pmtiles, z, x, y ->
@@ -47,6 +47,7 @@ defmodule ExPmtiles.CacheTest do
     # Start the cache
     {:ok, pid} =
       Cache.start_link(
+        region: nil,
         bucket: @bucket,
         path: @path,
         max_entries: @max_cache_size
