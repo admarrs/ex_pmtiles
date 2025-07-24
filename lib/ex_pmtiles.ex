@@ -333,7 +333,6 @@ defmodule ExPmtiles do
 
             {directory, updated_instance}
 
-
           pid when pid == self() ->
             # We're already processing this directory (recursive case)
             {nil, instance}

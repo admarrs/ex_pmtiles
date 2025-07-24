@@ -25,7 +25,8 @@ defmodule ExPmtiles.MixProject do
       {:ex_aws_s3, "~> 2.0"},
 
       # test deps
-      {:mox, "~> 1.0", only: :test}
+      {:mox, "~> 1.0", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 end

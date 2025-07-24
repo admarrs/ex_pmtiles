@@ -82,15 +82,15 @@ defmodule ExPmtiles.Storage do
 
   defp get_from_s3(instance, offset, length) do
     case ExAws.S3.get_object(
-            instance.bucket,
-            instance.path,
-            range: "bytes=#{offset}-#{offset + length - 1}",
-            opts: [
-              recv_timeout: 30_000,
-              hackney: [pool: :s3_pool]
-            ]
-          )
-          |> ExAws.request() do
+           instance.bucket,
+           instance.path,
+           range: "bytes=#{offset}-#{offset + length - 1}",
+           opts: [
+             recv_timeout: 30_000,
+             hackney: [pool: :s3_pool]
+           ]
+         )
+         |> ExAws.request() do
       {:ok, %{body: body}} ->
         body
 
