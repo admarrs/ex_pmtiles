@@ -576,7 +576,7 @@ defmodule ExPmtiles.Cache do
   end
 
   defp start_background_cache_population(pmtiles, bucket, path) do
-    if Mix.env() != :test do
+    if @env != :test do
       Logger.info("Starting background population of directory cache for zoom levels 0-4")
 
       try_load_cached_directories(pmtiles, bucket, path)
