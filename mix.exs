@@ -2,7 +2,7 @@ defmodule ExPmtiles.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/almarrs/ex_pmtiles"
-  @version "0.1.2"
+  @version "0.1.3"
 
   def project do
     [
@@ -36,8 +36,8 @@ defmodule ExPmtiles.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:ex_aws, "~> 2.0"},
-      {:ex_aws_s3, "~> 2.0"},
+      {:ex_aws, "~> 2.5"},
+      {:ex_aws_s3, "~> 2.5"},
 
       # test deps
       {:excoveralls, "~> 0.18", only: :test},

@@ -89,13 +89,15 @@ defmodule ExPmtiles.Cache do
   Starts a new PMTiles cache GenServer.
 
   Creates a named GenServer process that manages caching for a specific PMTiles file.
-  The process name is derived from the bucket and path to ensure uniqueness.
+  The process name is derived from the bucket and path to ensure uniqueness, unless
+  a custom name is provided.
 
   ## Parameters
 
   - `opts` - Keyword list of options:
     - `:bucket` - S3 bucket name (or `nil` for local files)
     - `:path` - Path to the PMTiles file
+    - `:name` - Custom name for the GenServer (atom). If not provided, a name will be derived from bucket and path
     - `:max_entries` - Maximum number of tiles to cache (default: 100,000)
 
   ## Returns
@@ -113,13 +115,17 @@ defmodule ExPmtiles.Cache do
 
       iex> ExPmtiles.Cache.start_link(bucket: "maps", path: "world.pmtiles", max_entries: 50_000)
       {:ok, #PID<0.125.0>}
+
+      iex> ExPmtiles.Cache.start_link(bucket: "maps", path: "world.pmtiles", name: :my_custom_cache)
+      {:ok, #PID<0.126.0>}
   """
   def start_link(opts \\ []) do
     region = Keyword.get(opts, :region)
     bucket = Keyword.get(opts, :bucket)
     path = Keyword.get(opts, :path)
     storage = Keyword.get(opts, :storage, :s3)
-    GenServer.start_link(__MODULE__, {region, bucket, path, storage, opts}, name: name_for(bucket, path))
+    name = Keyword.get(opts, :name, name_for(bucket, path))
+    GenServer.start_link(__MODULE__, {region, bucket, path, storage, opts}, name: name)
   end
 
   @doc """
@@ -130,7 +136,10 @@ defmodule ExPmtiles.Cache do
 
   ## Parameters
 
-  - `{bucket, path}` - Tuple identifying the PMTiles file or `pid` identifying the cache process
+  - `server` - One of:
+    - `{bucket, path}` - Tuple identifying the PMTiles file (uses derived name)
+    - `pid` - Process identifier for the cache GenServer
+    - `name` - Atom representing the registered name of the cache GenServer
   - `z` - Zoom level (integer)
   - `x` - X coordinate (integer)
   - `y` - Y coordinate (integer)
@@ -150,6 +159,9 @@ defmodule ExPmtiles.Cache do
       {:error, :tile_not_found}
 
       iex> ExPmtiles.Cache.get_tile(pid, 10, 512, 256)
+      {:ok, <<...>>}
+
+      iex> ExPmtiles.Cache.get_tile(:my_custom_cache, 10, 512, 256)
       {:ok, <<...>>}
   """
   def get_tile({bucket, path}, z, x, y) do
@@ -173,8 +185,8 @@ defmodule ExPmtiles.Cache do
     end
   end
 
-  def get_tile(pid, z, x, y) do
-    case GenServer.call(pid, {:get_tile, z, x, y}, :infinity) do
+  def get_tile(server, z, x, y) when is_pid(server) or is_atom(server) do
+    case GenServer.call(server, {:get_tile, z, x, y}, :infinity) do
       {:ok, tile_data} ->
         tile_data
 
