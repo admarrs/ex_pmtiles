@@ -23,7 +23,7 @@ Add `ex_pmtiles` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_pmtiles, "~> 0.1.0"}
+    {:ex_pmtiles, "~> 0.1.4"}
   ]
 end
 ```
@@ -57,13 +57,14 @@ For production applications, use the caching layer for better performance:
 ```elixir
 # Start the cache for an S3 PMTiles file
 {:ok, cache_pid} = ExPmtiles.Cache.start_link(
+  name: :cache_one,
   bucket: "maps", 
   path: "world.pmtiles",
   max_entries: 100_000
 )
 
 # Get tiles with automatic caching
-case ExPmtiles.Cache.get_tile(cache_pid, 10, 512, 256) do
+case ExPmtiles.Cache.get_tile(:cache_one, 10, 512, 256) do
   {:ok, tile_data} ->
     # Handle tile data
     tile_data
@@ -73,7 +74,7 @@ case ExPmtiles.Cache.get_tile(cache_pid, 10, 512, 256) do
 end
 
 # Get cache statistics
-stats = ExPmtiles.Cache.get_stats(cache_pid)
+stats = ExPmtiles.Cache.get_stats(:cache_one)
 # Returns: %{hits: 150, misses: 25}
 ```
 

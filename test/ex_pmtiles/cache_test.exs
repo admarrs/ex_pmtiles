@@ -16,7 +16,7 @@ defmodule ExPmtiles.CacheTest do
   # Mock the Pmtiles module
   setup do
     # Clean up any existing process
-    case Process.whereis(:"pmtiles_cache_process_#{@bucket}_test") do
+    case Process.whereis(:cache_one) do
       nil -> :ok
       pid -> GenServer.stop(pid)
     end
@@ -29,8 +29,8 @@ defmodule ExPmtiles.CacheTest do
       %{region: region, bucket: bucket, path: path, storage: storage}
     end)
 
-    stub(CacheMock, :get_zxy, fn _pmtiles, z, x, y ->
-      {0, 100, "tile_data_#{z}_#{x}_#{y}"}
+    stub(CacheMock, :get_zxy, fn pmtiles, z, x, y ->
+      {{0, 100, "tile_data_#{z}_#{x}_#{y}"}, pmtiles}
     end)
 
     stub(CacheMock, :zxy_to_tile_id, fn z, x, y ->
@@ -47,6 +47,7 @@ defmodule ExPmtiles.CacheTest do
     # Start the cache
     {:ok, pid} =
       Cache.start_link(
+        name: :cache_one,
         region: nil,
         bucket: @bucket,
         path: @path,
@@ -69,7 +70,7 @@ defmodule ExPmtiles.CacheTest do
     end
 
     test "creates ETS tables" do
-      table_name = :"pmtiles_cache_table_#{@bucket}_test"
+      table_name = :cache_one_table
       stats_table = :"#{table_name}_stats"
 
       assert :ets.info(table_name) != :undefined
@@ -86,11 +87,11 @@ defmodule ExPmtiles.CacheTest do
     test "returns cached tile on hit", %{cache_pid: pid} do
       # First request (miss)
       tile_data = Cache.get_tile(pid, 0, 0, 0)
-      assert tile_data == "tile_data_0_0_0"
+      assert tile_data == {:ok, "tile_data_0_0_0"}
 
       # Second request (hit)
       tile_data = Cache.get_tile(pid, 0, 0, 0)
-      assert tile_data == "tile_data_0_0_0"
+      assert tile_data == {:ok, "tile_data_0_0_0"}
 
       # Check stats
       stats = Cache.get_stats(pid)
@@ -100,7 +101,7 @@ defmodule ExPmtiles.CacheTest do
 
     test "handles cache misses", %{cache_pid: pid} do
       tile_data = Cache.get_tile(pid, 5, 10, 15)
-      assert tile_data == "tile_data_5_10_15"
+      assert tile_data == {:ok, "tile_data_5_10_15"}
 
       stats = Cache.get_stats(pid)
       assert stats.misses == 1
@@ -111,7 +112,7 @@ defmodule ExPmtiles.CacheTest do
     # Tag slow tests
     @tag :slow
     test "respects cache size limits", %{cache_pid: pid} do
-      table_name = :"pmtiles_cache_table_#{@bucket}_test"
+      table_name = :cache_one_table
 
       # Fill cache to just over the limit (faster test)
       for i <- 1..(@max_cache_size + 100) do
@@ -125,7 +126,7 @@ defmodule ExPmtiles.CacheTest do
     end
 
     test "basic cache size management works", %{cache_pid: pid} do
-      table_name = :"pmtiles_cache_table_#{@bucket}_test"
+      table_name = :cache_one_table
 
       # Test with just a few entries
       for i <- 1..5 do
@@ -157,7 +158,7 @@ defmodule ExPmtiles.CacheTest do
 
   describe "termination" do
     test "cleans up ETS tables on termination", %{cache_pid: pid} do
-      table_name = :"pmtiles_cache_table_#{@bucket}_test"
+      table_name = :cache_one_table
       stats_table = :"#{table_name}_stats"
 
       # Stop the cache
