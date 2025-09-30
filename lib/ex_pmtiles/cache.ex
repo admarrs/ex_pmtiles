@@ -85,6 +85,7 @@ defmodule ExPmtiles.Cache do
   @cache_dir "priv/pmtiles_cache"
 
   # Client API
+
   @doc """
   Starts a new PMTiles cache GenServer.
 
@@ -169,7 +170,7 @@ defmodule ExPmtiles.Cache do
     Logger.debug("Starting request #{request_id} for tile #{z}/#{x}/#{y}")
 
     name = name_for(bucket, path)
-    table_name = table_name_for(bucket, path)
+    table_name = table_name_for(name)
 
     tables = %{
       table: table_name,
@@ -186,13 +187,7 @@ defmodule ExPmtiles.Cache do
   end
 
   def get_tile(server, z, x, y) when is_pid(server) or is_atom(server) do
-    case GenServer.call(server, {:get_tile, z, x, y}, :infinity) do
-      {:ok, tile_data} ->
-        tile_data
-
-      {:error, _reason} ->
-        nil
-    end
+   GenServer.call(server, {:get_tile, z, x, y}, :infinity)
   end
 
   @doc """
@@ -203,7 +198,7 @@ defmodule ExPmtiles.Cache do
 
   ## Parameters
 
-  - `pid` - The cache process PID
+  - `server` - The cache process PID or registered name
 
   ## Returns
 
@@ -219,23 +214,25 @@ defmodule ExPmtiles.Cache do
       iex> ExPmtiles.Cache.get_stats(pid)
       %{hits: 175, misses: 30}
   """
-  def get_stats(pid) do
-    GenServer.call(pid, :get_stats)
+  def get_stats(server) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, :get_stats, :infinity)
   end
 
   # Server callbacks
   @impl true
   def init({region, bucket, path, storage, opts}) do
+    name = Keyword.get(opts, :name, name_for(bucket, path))
+
     case initialize_pmtiles(region, bucket, path, storage) do
       nil -> {:stop, :pmtiles_not_found}
-      pmtiles -> setup_cache_server(pmtiles, bucket, path, opts)
+      pmtiles -> setup_cache_server(pmtiles, name, bucket, path, opts)
     end
   end
 
   @impl true
   def handle_call(
         {:get_tile, z, x, y},
-        _from,
+        from,
         %{pmtiles: pmtiles, table: table, stats_table: stats_table, max_entries: max_entries} =
           state
       ) do
@@ -251,23 +248,78 @@ defmodule ExPmtiles.Cache do
         {:reply, {:ok, tile_data}, state}
 
       [] ->
-        # Cache miss - fetch tile and cache the result
+        # Cache miss - fetch tile asynchronously to avoid blocking GenServer
         update_stats(stats_table, :miss)
 
-        case fetch_and_cache_tile(pmtiles, tile_id, table, max_entries) do
-          {:ok, tile_data} ->
-            {:reply, {:ok, tile_data}, state}
+        # Spawn task to fetch tile without blocking
+        parent = self()
+        Task.start(fn ->
+          result = fetch_and_cache_tile(pmtiles, tile_id, table, max_entries)
+          GenServer.reply(from, result)
+          # Update pmtiles state if needed
+          case result do
+            {:ok, _tile_data} -> :ok
+            {:error, _reason} -> :ok
+          end
+        end)
 
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
+        {:noreply, state}
     end
   end
 
   @impl true
-  def handle_call({:fetch_and_cache_tile, z, x, y, request_id, tile_id}, _from, state) do
+  def handle_call({:fetch_and_cache_tile, z, x, y, request_id, tile_id}, from, state) do
     Logger.debug("Starting fetch for request #{request_id}")
-    handle_tile_fetch(z, x, y, request_id, tile_id, state)
+
+    # Spawn task to avoid blocking GenServer
+    parent = self()
+    pmtiles = state.pmtiles
+    pending_table = state.pending_table
+    table = state.table
+    max_entries = state.max_entries
+
+    Task.start(fn ->
+      result = fetch_tile_data(pmtiles, z, x, y)
+
+      # Cache the result
+      case result do
+        {{_offset, _length, tile_data}, updated_pmtiles} ->
+          now = System.system_time(:second)
+          :ets.insert(table, {tile_id, tile_data, now})
+          check_table_size(table, max_entries)
+
+          # Notify waiting processes
+          notify_waiting_from_pending(pending_table, tile_id, {:ok, tile_data})
+
+          # Update state and reply
+          GenServer.cast(parent, {:update_pmtiles, updated_pmtiles})
+          GenServer.reply(from, {:ok, tile_data})
+
+        {nil, updated_pmtiles} ->
+          # Notify waiting processes
+          notify_waiting_from_pending(pending_table, tile_id, {:error, :tile_not_found})
+
+          # Update state and reply
+          GenServer.cast(parent, {:update_pmtiles, updated_pmtiles})
+          GenServer.reply(from, {:error, :tile_not_found})
+      end
+    end)
+
+    {:noreply, state}
+  end
+
+  defp notify_waiting_from_pending(pending_table, tile_id, result) do
+    case :ets.lookup(pending_table, tile_id) do
+      [{^tile_id, waiting_pids}] ->
+        Enum.each(waiting_pids, fn pid ->
+          send(pid, {:tile_ready, tile_id, result})
+        end)
+
+      [] ->
+        :ok
+    end
+
+    :ets.delete(pending_table, tile_id)
   end
 
   @impl true
@@ -304,18 +356,18 @@ defmodule ExPmtiles.Cache do
     :"#{@table_prefix}_process_#{bucket}_#{Path.basename(path, ".pmtiles")}"
   end
 
-  defp table_name_for(bucket, path) do
-    :"#{@table_prefix}_table_#{bucket}_#{Path.basename(path, ".pmtiles")}"
+  defp table_name_for(server_name) do
+    :"#{server_name}_table"
   end
 
   defp fetch_and_cache_tile(pmtiles, tile_id, table, max_entries) do
     {z, x, y} = pmtiles_module().tile_id_to_zxy(tile_id)
 
     case pmtiles_module().get_zxy(pmtiles, z, x, y) do
-      nil ->
+      {nil, _updated_pmtiles} ->
         {:error, :tile_not_found}
 
-      {_offset, _length, tile_data} ->
+      {{_offset, _length, tile_data}, _updated_pmtiles} ->
         now = System.system_time(:second)
         :ets.insert(table, {tile_id, tile_data, now})
         check_table_size(table, max_entries)
@@ -556,10 +608,10 @@ defmodule ExPmtiles.Cache do
     pmtiles_module().new(region, bucket, path, storage)
   end
 
-  defp setup_cache_server(pmtiles, bucket, path, opts) do
-    table_name = table_name_for(bucket, path)
+  defp setup_cache_server(pmtiles, server_name, bucket, path, opts) do
+    table_name = table_name_for(server_name)
     max_entries = Keyword.get(opts, :max_entries, @default_max_entries)
-    Logger.info("Initializing PMTiles cache for #{bucket}/#{path}")
+    Logger.info("Initializing PMTiles cache for #{bucket}/#{path} with name #{server_name}")
 
     tables = create_ets_tables(table_name)
 

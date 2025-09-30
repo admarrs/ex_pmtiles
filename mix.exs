@@ -2,7 +2,7 @@ defmodule ExPmtiles.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/almarrs/ex_pmtiles"
-  @version "0.1.3"
+  @version "0.1.4"
 
   def project do
     [
