@@ -8,6 +8,10 @@ defmodule ExPmtiles.Behaviour do
   @callback get_tile(map(), integer(), integer()) :: binary() | nil
   @callback get_zxy(map(), integer(), integer(), integer()) ::
               {integer(), integer(), binary()} | nil
+  @callback get_zxy(map(), integer(), integer(), integer(), String.t() | nil, atom() | nil) ::
+              {integer(), integer(), binary()} | nil
+  @callback get_cached_directory_file(map(), integer(), integer(), String.t() | nil, atom() | nil) ::
+              map()
   @callback zxy_to_tile_id(integer(), integer(), integer()) :: integer()
   @callback tile_id_to_zxy(integer()) :: {integer(), integer(), integer()}
   # coveralls-ignore-end

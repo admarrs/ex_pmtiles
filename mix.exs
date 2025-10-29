@@ -1,8 +1,8 @@
 defmodule ExPmtiles.MixProject do
   use Mix.Project
 
-  @source_url "https://github.com/almarrs/ex_pmtiles"
-  @version "0.1.4"
+  @source_url "https://github.com/admarrs/ex_pmtiles"
+  @version "0.2.4"
 
   def project do
     [
@@ -11,6 +11,7 @@ defmodule ExPmtiles.MixProject do
       elixir: "~> 1.17",
       name: "ExPmtiles",
       source_url: @source_url,
+      aliases: aliases(),
       package: package(),
       deps: deps(),
       docs: docs(),
@@ -29,7 +30,14 @@ defmodule ExPmtiles.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger]
+      mod: {ExPmtiles, []},
+      extra_applications: [:logger, :hackney]
+    ]
+  end
+
+  def cli do
+    [
+      preferred_envs: [precommit: :test]
     ]
   end
 
@@ -38,14 +46,22 @@ defmodule ExPmtiles.MixProject do
     [
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
+      {:hackney, "~> 1.18"},
 
       # test deps
       {:excoveralls, "~> 0.18", only: :test},
       {:mox, "~> 1.0", only: :test},
+      {:benchee, "~> 1.0", only: [:dev, :test]},
 
       # dev & test deps
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false, warn_if_outdated: true}
+    ]
+  end
+
+  defp aliases do
+    [
+      precommit: ["compile --warning-as-errors", "deps.unlock --unused", "format", "test"]
     ]
   end
 

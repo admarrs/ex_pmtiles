@@ -81,27 +81,53 @@ defmodule ExPmtiles.Storage do
   end
 
   defp get_from_s3(instance, offset, length) do
-    case ExAws.S3.get_object(
-           instance.bucket,
-           instance.path,
-           range: "bytes=#{offset}-#{offset + length - 1}",
-           opts: [
-             recv_timeout: 30_000,
-             hackney: [pool: :s3_pool]
-           ]
-         )
-         |> request(instance.region) do
+    # Use application config for timeout, default to 15s (reasonable for S3)
+    timeout = Application.get_env(:ex_pmtiles, :http_timeout, 15_000)
+
+    result =
+      ExAws.S3.get_object(
+        instance.bucket,
+        instance.path,
+        range: "bytes=#{offset}-#{offset + length - 1}"
+      )
+      |> request(instance.region, timeout)
+
+    case result do
       {:ok, %{body: body}} ->
         body
 
-      {:error, error} ->
-        Logger.error("S3 range request failed: #{inspect(error)}")
+      {:error, _error} ->
         nil
     end
   end
 
-  defp request(op, nil), do: ExAws.request(op)
-  defp request(op, region), do: ExAws.request(op, region: region)
+  defp request(op, nil, timeout) do
+    ExAws.request(op,
+      http_opts: [
+        recv_timeout: timeout,
+        connect_timeout: 5_000,
+        hackney: [
+          pool: :s3_pool,
+          # Enable TCP keepalive for long-lived connections
+          tcp_options: [:inet6, {:keepalive, true}]
+        ]
+      ]
+    )
+  end
+
+  defp request(op, region, timeout) do
+    ExAws.request(op,
+      region: region,
+      http_opts: [
+        recv_timeout: timeout,
+        connect_timeout: 5_000,
+        hackney: [
+          pool: :s3_pool,
+          tcp_options: [:inet6, {:keepalive, true}]
+        ]
+      ]
+    )
+  end
 
   defp get_from_local(instance, offset, length) do
     path = instance.path
