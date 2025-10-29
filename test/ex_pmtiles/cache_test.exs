@@ -21,7 +21,7 @@ defmodule ExPmtiles.CacheTest do
     end
 
     # Clean up cache files from previous test runs
-    cache_dir = System.tmp_dir!() <> "/ex_pmtiles_cache"
+    cache_dir = Path.join([System.tmp_dir!(), "ex_pmtiles_cache"])
     File.rm_rf(cache_dir)
 
     # Set up individual stubs for each function
@@ -76,7 +76,7 @@ defmodule ExPmtiles.CacheTest do
     test "creates required tables" do
       table_name = :cache_one_table
       stats_table = :"#{table_name}_stats"
-      cache_dir = System.tmp_dir!() <> "ex_pmtiles_cache"
+      cache_dir = Path.join([System.tmp_dir!(), "ex_pmtiles_cache"])
 
       assert :ets.info(stats_table) != :undefined
       # Cache directory should exist when tile caching is enabled
@@ -332,7 +332,7 @@ defmodule ExPmtiles.CacheTest do
     end
 
     test "does not create cache files when disabled", %{cache_pid: pid} do
-      cache_dir = System.tmp_dir!() <> "/ex_pmtiles_cache"
+      cache_dir = Path.join([System.tmp_dir!(), "ex_pmtiles_cache"])
 
       # Request a tile
       Cache.get_tile(pid, 0, 0, 0)
