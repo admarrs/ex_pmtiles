@@ -101,10 +101,10 @@ defmodule ExPmtiles.Cache do
   alias ExPmtiles.Cache.Operations
   alias ExPmtiles.Cache.FileHandler
 
-  @env Mix.env()
   @table_prefix :pmtiles_cache
   @default_max_entries 100_000
 
+  @env Mix.env()
   # Client API
 
   @doc """
@@ -474,13 +474,7 @@ defmodule ExPmtiles.Cache do
 
   # Used to get the pmtiles module from the application environment so it can be mocked in tests
   defp pmtiles_module do
-    case @env do
-      :test ->
-        ExPmtiles.CacheMock
-
-      _ ->
-        ExPmtiles
-    end
+    Application.get_env(:ex_pmtiles, :pmtiles_module, ExPmtiles)
   end
 
   # Private functions

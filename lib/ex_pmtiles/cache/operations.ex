@@ -351,12 +351,6 @@ defmodule ExPmtiles.Cache.Operations do
 
   # Used to get the pmtiles module from the application environment so it can be mocked in tests
   defp pmtiles_module do
-    case @env do
-      :test ->
-        ExPmtiles.CacheMock
-
-      _ ->
-        ExPmtiles
-    end
+    Application.get_env(:ex_pmtiles, :pmtiles_module, ExPmtiles)
   end
 end
