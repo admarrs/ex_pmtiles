@@ -58,6 +58,18 @@ defmodule ExPmtiles do
   - `:webp` - WebP images
   - `:avif` - AVIF images
   - `:unknown` - Unknown tile type
+
+  ## HTTP Connection Pooling
+
+  For optimal S3 performance, this module uses a dedicated Hackney connection pool.
+  The pool is automatically started when the application starts. You can configure
+  the pool size via application configuration:
+
+  ```elixir
+  config :ex_pmtiles,
+    http_pool_size: 100,  # Maximum number of connections (default: 100)
+    http_timeout: 15_000  # Request timeout in milliseconds (default: 15_000)
+  ```
   """
   @behaviour ExPmtiles.Behaviour
   import Bitwise
@@ -67,6 +79,25 @@ defmodule ExPmtiles do
   alias __MODULE__
 
   require Logger
+
+  @doc false
+  def start(_type, _args) do
+    # Configure Hackney connection pool for optimal S3 performance
+    pool_size = Application.get_env(:ex_pmtiles, :http_pool_size, 100)
+
+    pool_opts = [
+      # Connection idle timeout (2.5 minutes)
+      timeout: 150_000,
+      max_connections: pool_size
+    ]
+
+    :hackney_pool.start_pool(:s3_pool, pool_opts)
+
+    # Start a supervisor (even though we don't have children yet, this allows future expansion)
+    children = []
+    opts = [strategy: :one_for_one, name: ExPmtiles.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
 
   @compression_types %{
     0 => :unknown,
@@ -85,7 +116,15 @@ defmodule ExPmtiles do
     5 => :avif
   }
 
-  defstruct [:header, :region, :bucket, :path, :source, directories: %{}, pending_directories: %{}]
+  defstruct [
+    :header,
+    :region,
+    :bucket,
+    :path,
+    :source,
+    directories: %{},
+    pending_directories: %{}
+  ]
 
   @tz_values %{
     0 => 0,
@@ -230,32 +269,87 @@ defmodule ExPmtiles do
       iex> ExPmtiles.get_zxy(instance, 25, 0, 0)
       {nil, instance}  # Zoom level out of bounds
   """
-  def get_zxy(instance, z, x, y) do
-    tile_id =
-      zxy_to_tile_id(z, x, y)
-
+  def get_zxy(instance, z, x, y, dir_cache_path \\ nil, pending_directories_table \\ nil) do
+    tile_id = zxy_to_tile_id(z, x, y)
     header = instance.header
 
     if z < header.min_zoom or z > header.max_zoom do
       {nil, instance}
     else
-      try_get_tile(instance, tile_id, header.root_offset, header.root_length, 0)
+      try_get_tile(
+        instance,
+        tile_id,
+        header.root_offset,
+        header.root_length,
+        0,
+        dir_cache_path,
+        pending_directories_table
+      )
     end
   end
 
-  defp try_get_tile(_instance, _tile_id, _d_offset, _d_length, depth) when depth > 3 do
+  defp try_get_tile(
+         _instance,
+         _tile_id,
+         _d_offset,
+         _d_length,
+         depth,
+         _dir_cache_path,
+         _pending_directories_table
+       )
+       when depth > 3 do
     raise ArgumentError, "Maximum directory depth exceeded"
   end
 
-  defp try_get_tile(instance, tile_id, d_offset, d_length, depth) do
-    {directory, updated_instance} = get_cached_directory(instance, d_offset, d_length)
+  defp try_get_tile(
+         instance,
+         tile_id,
+         d_offset,
+         d_length,
+         depth,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    # Use file-based caching if cache paths provided, otherwise use in-memory caching
+    {directory, updated_instance} =
+      if is_nil(dir_cache_path) or is_nil(pending_directories_table) do
+        # In-memory caching for simple API
+        get_cached_directory(instance, d_offset, d_length)
+      else
+        # File-based caching for Cache module
+        directory =
+          get_cached_directory_file(
+            instance,
+            d_offset,
+            d_length,
+            dir_cache_path,
+            pending_directories_table
+          )
+
+        {directory, instance}
+      end
 
     case directory do
       nil ->
         {nil, updated_instance}
 
       directory ->
-        process_directory_entry(directory, tile_id, updated_instance, d_offset, d_length, depth)
+        if is_nil(dir_cache_path) or is_nil(pending_directories_table) do
+          # In-memory path
+          process_directory_entry(directory, tile_id, updated_instance, d_offset, d_length, depth)
+        else
+          # File-based path
+          process_directory_entry_file(
+            directory,
+            tile_id,
+            updated_instance,
+            d_offset,
+            d_length,
+            depth,
+            dir_cache_path,
+            pending_directories_table
+          )
+        end
     end
   end
 
@@ -293,13 +387,15 @@ defmodule ExPmtiles do
     cache_key = "#{d_offset}:#{d_length}"
     notify_directory_waiters(cache_key, directory, instance)
 
-    # Continue searching in leaf directory
+    # Continue searching in leaf directory (use in-memory caching)
     try_get_tile(
       instance,
       tile_id,
       instance.header.leaf_dir_offset + entry.offset,
       entry.length,
-      depth + 1
+      depth + 1,
+      nil,
+      nil
     )
   end
 
@@ -344,8 +440,11 @@ defmodule ExPmtiles do
               {:directory_ready, ^cache_key, directory, updated_instance} ->
                 {directory, updated_instance}
             after
-              30_000 ->
-                Logger.error("Timeout waiting for directory #{cache_key}")
+              100_000 ->
+                Logger.error(
+                  "Timeout waiting for directory #{cache_key} after 100s (in-memory cache, waiting for another process)"
+                )
+
                 {nil, instance}
             end
         end
@@ -367,6 +466,560 @@ defmodule ExPmtiles do
         # Notify any waiting processes about the completed directory
         send(other_pid, {:directory_ready, cache_key, directory, instance})
     end
+  end
+
+  # File-based directory caching functions
+  @doc false
+  def get_cached_directory_file(
+        instance,
+        offset,
+        length,
+        dir_cache_path,
+        pending_directories_table
+      ) do
+    cache_key = "#{offset}:#{length}"
+
+    # Use file-based caching for persistent storage
+    # dir_cache_path contains the cache directory path
+    if is_nil(dir_cache_path) do
+      # Caching not enabled, fetch directly
+      fetch_directory_without_cache(instance, offset, length)
+    else
+      # Check if cached file exists
+      cache_file_path = directory_cache_file_path(dir_cache_path, cache_key)
+
+      if File.exists?(cache_file_path) do
+        # Cache hit - read from file
+        read_directory_from_cache(cache_file_path)
+      else
+        # Cache miss - fetch and cache
+        handle_directory_cache_miss(
+          instance,
+          cache_key,
+          length,
+          dir_cache_path,
+          pending_directories_table
+        )
+      end
+    end
+  end
+
+  defp fetch_directory_without_cache(instance, offset, length) do
+    # Fetch and deserialize directly without caching
+    bytes = get_bytes(instance, offset, length)
+
+    if is_nil(bytes) do
+      nil
+    else
+      bytes
+      |> decompress(instance.header.internal_compression)
+      |> deserialize_directory()
+    end
+  end
+
+  # Generate file path for a cached directory
+  defp directory_cache_file_path(cache_dir, cache_key) do
+    # Sanitize cache_key to be filesystem-safe
+    safe_key = String.replace(cache_key, ":", "_")
+    Path.join([cache_dir, "#{safe_key}.bin"])
+  end
+
+  # Read directory from cache file
+  defp read_directory_from_cache(cache_file_path) do
+    try do
+      cache_file_path
+      |> File.read!()
+      |> :erlang.binary_to_term()
+    rescue
+      e ->
+        Logger.warning("Failed to read directory cache file #{cache_file_path}: #{inspect(e)}")
+        nil
+    end
+  end
+
+  # Write directory to cache file
+  defp write_directory_to_cache(cache_file_path, directory) do
+    try do
+      # Ensure directory exists (handle race conditions gracefully)
+      dir_path = Path.dirname(cache_file_path)
+
+      case File.mkdir_p(dir_path) do
+        :ok ->
+          :ok
+
+        # Another process created it, that's fine
+        {:error, :eexist} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
+          throw({:mkdir_failed, reason})
+      end
+
+      # Write serialized directory
+      cache_file_path
+      |> File.write!(:erlang.term_to_binary(directory))
+
+      :ok
+    rescue
+      e ->
+        Logger.warning("Failed to write directory cache file #{cache_file_path}: #{inspect(e)}")
+        :error
+    catch
+      {:mkdir_failed, _reason} ->
+        :error
+    end
+  end
+
+  defp handle_directory_cache_miss(
+         instance,
+         cache_key,
+         length,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    case :ets.insert_new(pending_directories_table, {cache_key, self()}) do
+      true ->
+        fetch_and_cache_directory(
+          instance,
+          cache_key,
+          length,
+          dir_cache_path,
+          pending_directories_table
+        )
+
+      false ->
+        wait_for_directory_fetch(
+          instance,
+          cache_key,
+          length,
+          dir_cache_path,
+          pending_directories_table
+        )
+    end
+  end
+
+  defp fetch_and_cache_directory(
+         instance,
+         cache_key,
+         length,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    start_time = System.monotonic_time(:millisecond)
+
+    try do
+      result = fetch_and_process_directory(instance, cache_key, length, start_time)
+
+      case result do
+        nil ->
+          cleanup_failed_directory_fetch(pending_directories_table, cache_key)
+          nil
+
+        directory ->
+          cache_and_notify_directory(
+            directory,
+            cache_key,
+            dir_cache_path,
+            pending_directories_table
+          )
+
+          directory
+      end
+    rescue
+      e ->
+        handle_directory_fetch_error(e, cache_key, pending_directories_table, __STACKTRACE__)
+        nil
+    end
+  end
+
+  defp fetch_and_process_directory(instance, cache_key, length, start_time) do
+    fetch_start = System.monotonic_time(:millisecond)
+    bytes = get_bytes(instance, get_offset_from_cache_key(cache_key), length)
+    fetch_elapsed = System.monotonic_time(:millisecond) - fetch_start
+
+    if is_nil(bytes) do
+      nil
+    else
+      process_directory_bytes(bytes, instance, cache_key, start_time, fetch_elapsed)
+    end
+  end
+
+  defp process_directory_bytes(bytes, instance, _cache_key, _start_time, _fetch_elapsed) do
+    decompressed = decompress(bytes, instance.header.internal_compression)
+    directory = deserialize_directory(decompressed)
+
+    directory
+  end
+
+  defp get_offset_from_cache_key(cache_key) do
+    [offset_str, _length_str] = String.split(cache_key, ":")
+    String.to_integer(offset_str)
+  end
+
+  defp cache_and_notify_directory(
+         directory,
+         cache_key,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    # Write directory to individual file (no size limits)
+    # dir_cache_path contains the cache directory path
+    if not is_nil(dir_cache_path) do
+      cache_file_path = directory_cache_file_path(dir_cache_path, cache_key)
+      write_directory_to_cache(cache_file_path, directory)
+    end
+
+    # Notify all waiting processes BEFORE deleting from pending table
+    notify_directory_waiters_file(pending_directories_table, cache_key, directory)
+
+    # Now clean up the pending entry
+    :ets.delete(pending_directories_table, cache_key)
+  end
+
+  defp cleanup_failed_directory_fetch(pending_directories_table, cache_key) do
+    :ets.delete(pending_directories_table, cache_key)
+  end
+
+  defp handle_directory_fetch_error(e, cache_key, pending_directories_table, stacktrace) do
+    Logger.error("Failed to process directory #{cache_key}: #{inspect(e)}")
+    Logger.error(Exception.format_stacktrace(stacktrace))
+
+    # Notify waiting processes of failure before cleaning up
+    notify_directory_waiters_of_failure(pending_directories_table, cache_key)
+
+    :ets.delete(pending_directories_table, cache_key)
+  end
+
+  defp wait_for_directory_fetch(
+         instance,
+         cache_key,
+         length,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    result =
+      wait_for_directory_completion(
+        cache_key,
+        dir_cache_path,
+        pending_directories_table,
+        instance,
+        get_offset_from_cache_key(cache_key),
+        length
+      )
+
+    result
+  end
+
+  defp wait_for_directory_completion(
+         cache_key,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length
+       ) do
+    caller_pid = self()
+
+    case :ets.lookup(pending_directories_table, cache_key) do
+      [{^cache_key, waiting_pids}] when is_list(waiting_pids) ->
+        handle_waiting_with_list(
+          cache_key,
+          waiting_pids,
+          caller_pid,
+          dir_cache_path,
+          pending_directories_table,
+          instance,
+          offset,
+          length
+        )
+
+      [{^cache_key, _single_pid}] ->
+        handle_waiting_with_single_pid(
+          cache_key,
+          caller_pid,
+          dir_cache_path,
+          pending_directories_table,
+          instance,
+          offset,
+          length
+        )
+
+      [] ->
+        handle_missing_pending_entry(
+          cache_key,
+          dir_cache_path,
+          pending_directories_table,
+          instance,
+          offset,
+          length
+        )
+    end
+  end
+
+  defp handle_waiting_with_list(
+         cache_key,
+         waiting_pids,
+         caller_pid,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length
+       ) do
+    # Add ourselves to the waiting list
+    :ets.insert(pending_directories_table, {cache_key, [caller_pid | waiting_pids]})
+
+    # Wait for notification via message passing (event-driven, not polling)
+    receive do
+      {:directory_ready, ^cache_key, directory} ->
+        Logger.debug("Directory #{cache_key} received via notification")
+        directory
+    after
+      20_000 ->
+        handle_wait_timeout(
+          cache_key,
+          caller_pid,
+          dir_cache_path,
+          pending_directories_table,
+          instance,
+          offset,
+          length,
+          "file-based cache"
+        )
+    end
+  end
+
+  defp handle_waiting_with_single_pid(
+         cache_key,
+         caller_pid,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length
+       ) do
+    # Old format with single PID - convert to list format and add ourselves
+    :ets.insert(pending_directories_table, {cache_key, [caller_pid]})
+
+    receive do
+      {:directory_ready, ^cache_key, directory} ->
+        directory
+    after
+      20_000 ->
+        handle_wait_timeout(
+          cache_key,
+          caller_pid,
+          dir_cache_path,
+          pending_directories_table,
+          instance,
+          offset,
+          length,
+          "file-based cache, old format"
+        )
+    end
+  end
+
+  defp handle_missing_pending_entry(
+         cache_key,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length
+       ) do
+    # Pending entry was deleted - directory should be in file cache now
+    if is_nil(dir_cache_path) do
+      # Cache not available, fetch without cache
+      fetch_directory_without_cache(instance, offset, length)
+    else
+      cache_file_path = directory_cache_file_path(dir_cache_path, cache_key)
+
+      if File.exists?(cache_file_path) do
+        read_directory_from_cache(cache_file_path)
+      else
+        # Not in cache either - fetch failed, retry
+        get_cached_directory_file(
+          instance,
+          offset,
+          length,
+          dir_cache_path,
+          pending_directories_table
+        )
+      end
+    end
+  end
+
+  defp handle_wait_timeout(
+         cache_key,
+         caller_pid,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length,
+         context
+       ) do
+    # Log timeout with context
+    Logger.error(
+      "Timeout waiting for directory #{cache_key} after 20s (#{context}). " <>
+        "Attempting to fetch ourselves. This suggests slow storage or network issues."
+    )
+
+    # Remove ourselves from waiting list
+    remove_from_waiting_list(pending_directories_table, cache_key, caller_pid)
+
+    # Try to fetch it ourselves
+    fetch_directory_with_takeover(
+      cache_key,
+      dir_cache_path,
+      pending_directories_table,
+      instance,
+      offset,
+      length
+    )
+  end
+
+  defp remove_from_waiting_list(pending_directories_table, cache_key, caller_pid) do
+    case :ets.lookup(pending_directories_table, cache_key) do
+      [{^cache_key, pids}] when is_list(pids) ->
+        :ets.insert(pending_directories_table, {cache_key, List.delete(pids, caller_pid)})
+
+      [{^cache_key, _single_pid}] ->
+        # Old format, just delete the entry
+        :ets.delete(pending_directories_table, cache_key)
+
+      [] ->
+        :ok
+    end
+  end
+
+  defp fetch_directory_with_takeover(
+         cache_key,
+         dir_cache_path,
+         pending_directories_table,
+         instance,
+         offset,
+         length
+       ) do
+    # Try to take over the fetch by deleting the old pending entry
+    :ets.delete(pending_directories_table, cache_key)
+
+    # Check if it appeared in file cache while we were setting up
+    if is_nil(dir_cache_path) do
+      # Cache not available, fetch without cache
+      fetch_directory_without_cache(instance, offset, length)
+    else
+      cache_file_path = directory_cache_file_path(dir_cache_path, cache_key)
+
+      if File.exists?(cache_file_path) do
+        read_directory_from_cache(cache_file_path)
+      else
+        # Do the fetch ourselves
+        get_cached_directory_file(
+          instance,
+          offset,
+          length,
+          dir_cache_path,
+          pending_directories_table
+        )
+      end
+    end
+  end
+
+  # Helper function to notify all processes waiting for a directory (file-based)
+  defp notify_directory_waiters_file(pending_directories_table, cache_key, directory) do
+    case :ets.lookup(pending_directories_table, cache_key) do
+      [{^cache_key, waiting_pids}] when is_list(waiting_pids) ->
+        Enum.each(waiting_pids, fn pid ->
+          send(pid, {:directory_ready, cache_key, directory})
+        end)
+
+      [{^cache_key, _single_pid}] ->
+        # Old format - just single PID, no list
+        :ok
+
+      [] ->
+        # No waiters
+        :ok
+    end
+  end
+
+  defp notify_directory_waiters_of_failure(pending_directories_table, cache_key) do
+    case :ets.lookup(pending_directories_table, cache_key) do
+      [{^cache_key, waiting_pids}] when is_list(waiting_pids) ->
+        # Don't send failure message - let them timeout and retry
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp process_directory_entry_file(
+         directory,
+         tile_id,
+         instance,
+         _d_offset,
+         _d_length,
+         depth,
+         dir_cache_path,
+         pending_directories_table
+       ) do
+    case find_tile(directory, tile_id) do
+      nil ->
+        {nil, instance}
+
+      entry ->
+        handle_directory_entry_file(
+          entry,
+          instance,
+          tile_id,
+          dir_cache_path,
+          pending_directories_table,
+          depth
+        )
+    end
+  end
+
+  defp handle_directory_entry_file(
+         %{run_length: run_length} = entry,
+         instance,
+         _tile_id,
+         _dir_cache_path,
+         _pending_directories_table,
+         _depth
+       )
+       when run_length > 0 do
+    case get_bytes(instance, instance.header.tile_data_offset + entry.offset, entry.length) do
+      nil ->
+        {nil, instance}
+
+      response ->
+        {{instance.header.tile_data_offset + entry.offset, entry.length, response}, instance}
+    end
+  end
+
+  defp handle_directory_entry_file(
+         entry,
+         instance,
+         tile_id,
+         dir_cache_path,
+         pending_directories_table,
+         depth
+       ) do
+    # Continue searching in leaf directory
+    leaf_offset = instance.header.leaf_dir_offset + entry.offset
+
+    try_get_tile(
+      instance,
+      tile_id,
+      leaf_offset,
+      entry.length,
+      depth + 1,
+      dir_cache_path,
+      pending_directories_table
+    )
   end
 
   @doc """
@@ -423,40 +1076,44 @@ defmodule ExPmtiles do
       Enum.reduce(1..num_entries, {[], rest, 0}, fn _i, {entries, curr_data, last_id} ->
         {tmp, new_rest} = read_varint(curr_data)
         new_id = last_id + tmp
-        entry = %{tile_id: new_id, offset: 0, length: 0, run_length: 0}
+        entry = %{tile_id: new_id, offset: 0, length: 0, run_length: 1}
         {[entry | entries], new_rest, new_id}
       end)
       |> then(fn {entries, rest, _} -> {Enum.reverse(entries), rest} end)
 
     # Second pass: Add run_lengths
     {entries, rest} =
-      Enum.reduce(Enum.with_index(entries), {[], rest}, fn {entry, _i}, {acc, curr_data} ->
+      Enum.reduce(entries, {[], rest}, fn entry, {acc, curr_data} ->
         {run_length, new_rest} = read_varint(curr_data)
-        {acc ++ [%{entry | run_length: run_length}], new_rest}
+        {[%{entry | run_length: run_length} | acc], new_rest}
       end)
+      |> then(fn {entries, rest} -> {Enum.reverse(entries), rest} end)
 
     # Third pass: Add lengths
     {entries, rest} =
-      Enum.reduce(Enum.with_index(entries), {[], rest}, fn {entry, _i}, {acc, curr_data} ->
+      Enum.reduce(entries, {[], rest}, fn entry, {acc, curr_data} ->
         {length, new_rest} = read_varint(curr_data)
-        {acc ++ [%{entry | length: length}], new_rest}
+        {[%{entry | length: length} | acc], new_rest}
       end)
+      |> then(fn {entries, rest} -> {Enum.reverse(entries), rest} end)
 
     # Fourth pass: Add offsets
     {entries, _rest} =
-      Enum.reduce(Enum.with_index(entries), {[], rest}, fn {entry, i}, {acc, curr_data} ->
+      Enum.reduce(Enum.with_index(entries), {[], rest, nil}, fn {entry, i},
+                                                                {acc, curr_data, prev_entry} ->
         {tmp, new_rest} = read_varint(curr_data)
 
         offset =
-          if i > 0 and tmp == 0 do
-            prev_entry = Enum.at(acc, i - 1)
+          if i > 0 and tmp == 0 and prev_entry != nil do
             prev_entry.offset + prev_entry.length
           else
             tmp - 1
           end
 
-        {acc ++ [%{entry | offset: offset}], new_rest}
+        updated_entry = %{entry | offset: offset}
+        {[updated_entry | acc], new_rest, updated_entry}
       end)
+      |> then(fn {entries, rest, _prev} -> {Enum.reverse(entries), rest} end)
 
     entries
   end
