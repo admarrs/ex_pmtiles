@@ -98,11 +98,10 @@ defmodule ExPmtiles.Cache do
   use GenServer
   require Logger
 
-  alias ExPmtiles.Cache.Operations
   alias ExPmtiles.Cache.FileHandler
+  alias ExPmtiles.Cache.Operations
 
   @table_prefix :pmtiles_cache
-  @default_max_entries 100_000
 
   @env Mix.env()
   # Client API
@@ -190,8 +189,6 @@ defmodule ExPmtiles.Cache do
       {:ok, <<...>>}
   """
   def get_tile({bucket, path}, z, x, y) do
-    request_id = System.unique_integer([:positive])
-
     name = name_for(bucket, path)
     table_name = table_name_for(name)
 
@@ -204,24 +201,22 @@ defmodule ExPmtiles.Cache do
         nil
 
       pid ->
-        # Get cache configuration from server
-        enable_tile_cache = GenServer.call(pid, :get_tile_cache_enabled, 5000)
-        cache_path = GenServer.call(pid, :get_cache_path, 5000)
+        # Get PMTiles struct and configuration from server
+        {pmtiles, enable_tile_cache, cache_path} = GenServer.call(pid, :get_config, 5000)
 
         config = %{
-          table: table_name,
-          pending: :"#{table_name}_pending",
           stats: :"#{table_name}_stats",
-          cache_path: cache_path
+          cache_path: cache_path,
+          pending_directories: :"#{table_name}_pending_directories"
         }
 
+        # Do all the work in the calling process (Phoenix request process)
         Operations.handle_tile_request(
-          name,
+          pmtiles,
           tile_id,
           z,
           x,
           y,
-          request_id,
           config,
           enable_tile_cache
         )
@@ -229,9 +224,6 @@ defmodule ExPmtiles.Cache do
   end
 
   def get_tile(server, z, x, y) when is_pid(server) or is_atom(server) do
-    # For PID/atom, we need to get the server name
-    request_id = System.unique_integer([:positive])
-
     name =
       cond do
         is_atom(server) -> server
@@ -242,18 +234,17 @@ defmodule ExPmtiles.Cache do
 
     tile_id = pmtiles_module().zxy_to_tile_id(z, x, y)
 
-    # Get cache configuration from server
-    enable_tile_cache = GenServer.call(server, :get_tile_cache_enabled, 5000)
-    cache_path = GenServer.call(server, :get_cache_path, 5000)
+    # Get PMTiles struct and configuration from server
+    {pmtiles, enable_tile_cache, cache_path} = GenServer.call(server, :get_config, 5000)
 
     config = %{
-      table: table_name,
-      pending: :"#{table_name}_pending",
       stats: :"#{table_name}_stats",
-      cache_path: cache_path
+      cache_path: cache_path,
+      pending_directories: :"#{table_name}_pending_directories"
     }
 
-    Operations.handle_tile_request(name, tile_id, z, x, y, request_id, config, enable_tile_cache)
+    # Do all the work in the calling process (Phoenix request process)
+    Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, enable_tile_cache)
   end
 
   @doc """
@@ -347,6 +338,12 @@ defmodule ExPmtiles.Cache do
   end
 
   @impl true
+  def handle_call(:get_config, _from, state) do
+    # Return PMTiles struct and configuration for the caller to use
+    {:reply, {state.pmtiles, state.enable_tile_cache, state.cache_path}, state}
+  end
+
+  @impl true
   def handle_call(:get_stats, _from, %{stats_table: stats_table} = state) do
     [{:hits, hits}] = :ets.lookup(stats_table, :hits)
     [{:misses, misses}] = :ets.lookup(stats_table, :misses)
@@ -382,13 +379,6 @@ defmodule ExPmtiles.Cache do
       end
 
     {:reply, :ok, state}
-  end
-
-  @impl true
-  def handle_call(:get_pmtiles, _from, state) do
-    # Just return the pmtiles instance as-is
-    # ETS-based directory caching is handled externally
-    {:reply, {state.pmtiles, %{}}, state}
   end
 
   @impl true
@@ -493,16 +483,13 @@ defmodule ExPmtiles.Cache do
     %{
       table: state.table,
       cache_path: state.cache_path,
-      pending: state.pending_table,
       stats: state.stats_table,
-      pending_directories: state.pending_directories_table,
-      max_entries: :"#{state.table}_max_entries"
+      pending_directories: state.pending_directories_table
     }
   end
 
   defp setup_cache_server(pmtiles, server_name, bucket, path, opts) do
     table_name = table_name_for(server_name)
-    max_entries = Keyword.get(opts, :max_entries, @default_max_entries)
     enable_dir_cache = Keyword.get(opts, :enable_dir_cache, true)
     enable_tile_cache = Keyword.get(opts, :enable_tile_cache, false)
     max_cache_age_ms = Keyword.get(opts, :max_cache_age_ms)
@@ -511,7 +498,7 @@ defmodule ExPmtiles.Cache do
     Logger.info("Initializing PMTiles cache for #{bucket}/#{path} with name #{server_name}")
 
     cache_config =
-      init_cache(table_name, server_name, max_entries, enable_dir_cache, enable_tile_cache)
+      init_cache(table_name, server_name, enable_dir_cache, enable_tile_cache)
 
     # If max_cache_age_ms is set, clear existing cache on startup
     # Run the clearing in a task and await it to ensure it completes before background population
@@ -544,10 +531,8 @@ defmodule ExPmtiles.Cache do
        path: path,
        table: table_name,
        cache_path: cache_config.cache_path,
-       pending_table: cache_config.pending,
        stats_table: cache_config.stats,
        pending_directories_table: cache_config.pending_directories,
-       max_entries: max_entries,
        enable_dir_cache: enable_dir_cache,
        enable_tile_cache: enable_tile_cache,
        max_cache_age_ms: max_cache_age_ms,
@@ -555,7 +540,7 @@ defmodule ExPmtiles.Cache do
      }}
   end
 
-  defp init_cache(table_name, server_name, max_entries, enable_dir_cache, enable_tile_cache) do
+  defp init_cache(table_name, server_name, enable_dir_cache, enable_tile_cache) do
     # Create a unique cache directory for this cache instance using the server name
     # This ensures multiple cache instances don't share the same cache files
     base_cache_dir =
@@ -588,8 +573,7 @@ defmodule ExPmtiles.Cache do
       nil
     end
 
-    pending_table = :"#{table_name}_pending"
-    :ets.new(pending_table, [:set, :public, :named_table])
+    # Stats table for tracking hits/misses
     stats_table = :"#{table_name}_stats"
     :ets.new(stats_table, [:set, :public, :named_table])
     :ets.insert(stats_table, {:hits, 0})
@@ -599,18 +583,11 @@ defmodule ExPmtiles.Cache do
     pending_directories_table = :"#{table_name}_pending_directories"
     :ets.new(pending_directories_table, [:set, :public, :named_table])
 
-    # Max entries table for storing the max_entries limit
-    max_entries_table = :"#{table_name}_max_entries"
-    :ets.new(max_entries_table, [:set, :public, :named_table])
-    :ets.insert(max_entries_table, {:max_entries, max_entries})
-
     %{
       table: table_name,
       cache_path: cache_path,
-      pending: pending_table,
       stats: stats_table,
-      pending_directories: pending_directories_table,
-      max_entries: max_entries_table
+      pending_directories: pending_directories_table
     }
   end
 

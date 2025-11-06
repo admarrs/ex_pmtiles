@@ -10,7 +10,7 @@ PMTiles is an efficient single-file format for storing tiled map data, designed 
 
 - **Multi-storage support**: Read PMTiles files from local storage or Amazon S3
 - **Efficient caching**: File-based caching system with no size limits
-- **Concurrent access**: Safe concurrent access with request deduplication
+- **Concurrent access**: Safe concurrent access with simple, process-local tile fetching
 - **Compression support**: Built-in support for gzip compression
 - **Tile type support**: MVT, PNG, JPEG, WebP, and AVIF tile formats
 - **Performance optimized**: Background directory pre-loading and persistent file-based cache
@@ -24,7 +24,7 @@ Add `ex_pmtiles` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_pmtiles, "~> 0.2.4"}
+    {:ex_pmtiles, "~> 0.3.0"}
   ]
 end
 ```
@@ -250,17 +250,21 @@ config :ex_pmtiles,
 
 The library implements a sophisticated caching system:
 
-1. **Directory Cache (File-based)**: Persistent cache - deserialized PMTiles directory structures saved as individual files on disk (optional, disabled by default)
+1. **Directory Cache (File-based)**: Persistent cache - deserialized PMTiles directory structures saved as individual files on disk (optional, enabled by default)
 2. **Tile Cache (File-based)**: Persistent cache - individual tile data saved as files on disk (optional, disabled by default)
-3. **Request Coordination (ETS)**: In-memory coordination tables to prevent duplicate fetches for the same tile/directory
+3. **Statistics Tracking (ETS)**: In-memory counters for cache hits and misses
 
 ### Background Pre-loading
 
-The cache automatically pre-loads directories for zoom levels 0-4 in the background, improving response times for common zoom levels.
+The cache automatically pre-loads frequently accessed directories in the background on startup, improving response times for common zoom levels.
 
 ### Concurrent Request Handling
 
-Multiple processes can safely access the same cache without duplicate requests. The system coordinates requests and broadcasts results to all waiting processes.
+The cache uses a simple, efficient architecture where each request process does its own work:
+- Each Phoenix/web request fetches tiles directly in its own process
+- File-based caching handles concurrent access naturally through the filesystem
+- No inter-process coordination or waiting is needed
+- Multiple processes may occasionally fetch the same uncached tile concurrently (rare, and filesystem handles it safely)
 
 ## Supported Formats
 

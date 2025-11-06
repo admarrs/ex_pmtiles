@@ -298,6 +298,7 @@ defmodule ExPmtiles do
          _pending_directories_table
        )
        when depth > 3 do
+    Logger.warning("ExPmtiles try_get_tile, max directory depth exceeded #{depth}")
     raise ArgumentError, "Maximum directory depth exceeded"
   end
 
@@ -331,6 +332,12 @@ defmodule ExPmtiles do
 
     case directory do
       nil ->
+        require Logger
+
+        Logger.warning(
+          "Directory fetch failed at offset #{d_offset}, length #{d_length}, depth #{depth} for tile_id #{tile_id}"
+        )
+
         {nil, updated_instance}
 
       directory ->
@@ -356,6 +363,12 @@ defmodule ExPmtiles do
   defp process_directory_entry(directory, tile_id, instance, d_offset, d_length, depth) do
     case find_tile(directory, tile_id) do
       nil ->
+        require Logger
+
+        Logger.warning(
+          "Tile #{tile_id} not found in directory at offset #{d_offset}, length #{d_length}, depth #{depth}. Directory has #{length(directory)} entries"
+        )
+
         {nil, instance}
 
       entry ->
@@ -367,7 +380,7 @@ defmodule ExPmtiles do
          %{run_length: run_length} = entry,
          _directory,
          instance,
-         _tile_id,
+         tile_id,
          _d_offset,
          _d_length,
          _depth
@@ -375,6 +388,12 @@ defmodule ExPmtiles do
        when run_length > 0 do
     case get_bytes(instance, instance.header.tile_data_offset + entry.offset, entry.length) do
       nil ->
+        require Logger
+
+        Logger.warning(
+          "Failed to read tile data at offset #{instance.header.tile_data_offset + entry.offset}, length #{entry.length} for tile_id #{tile_id}"
+        )
+
         {nil, instance}
 
       response ->
@@ -526,49 +545,45 @@ defmodule ExPmtiles do
 
   # Read directory from cache file
   defp read_directory_from_cache(cache_file_path) do
-    try do
-      cache_file_path
-      |> File.read!()
-      |> :erlang.binary_to_term()
-    rescue
-      e ->
-        Logger.warning("Failed to read directory cache file #{cache_file_path}: #{inspect(e)}")
-        nil
-    end
+    cache_file_path
+    |> File.read!()
+    |> :erlang.binary_to_term()
+  rescue
+    e ->
+      Logger.warning("Failed to read directory cache file #{cache_file_path}: #{inspect(e)}")
+      nil
   end
 
   # Write directory to cache file
   defp write_directory_to_cache(cache_file_path, directory) do
-    try do
-      # Ensure directory exists (handle race conditions gracefully)
-      dir_path = Path.dirname(cache_file_path)
+    # Ensure directory exists (handle race conditions gracefully)
+    dir_path = Path.dirname(cache_file_path)
 
-      case File.mkdir_p(dir_path) do
-        :ok ->
-          :ok
+    case File.mkdir_p(dir_path) do
+      :ok ->
+        :ok
 
-        # Another process created it, that's fine
-        {:error, :eexist} ->
-          :ok
+      # Another process created it, that's fine
+      {:error, :eexist} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
-          throw({:mkdir_failed, reason})
-      end
-
-      # Write serialized directory
-      cache_file_path
-      |> File.write!(:erlang.term_to_binary(directory))
-
-      :ok
-    rescue
-      e ->
-        Logger.warning("Failed to write directory cache file #{cache_file_path}: #{inspect(e)}")
-        :error
-    catch
-      {:mkdir_failed, _reason} ->
-        :error
+      {:error, reason} ->
+        Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
+        throw({:mkdir_failed, reason})
     end
+
+    # Write serialized directory
+    cache_file_path
+    |> File.write!(:erlang.term_to_binary(directory))
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("Failed to write directory cache file #{cache_file_path}: #{inspect(e)}")
+      :error
+  catch
+    {:mkdir_failed, _reason} ->
+      :error
   end
 
   defp handle_directory_cache_miss(
@@ -960,14 +975,20 @@ defmodule ExPmtiles do
          directory,
          tile_id,
          instance,
-         _d_offset,
-         _d_length,
+         d_offset,
+         d_length,
          depth,
          dir_cache_path,
          pending_directories_table
        ) do
     case find_tile(directory, tile_id) do
       nil ->
+        require Logger
+
+        Logger.warning(
+          "Tile #{tile_id} not found in directory at offset #{d_offset}, length #{d_length}, depth #{depth}. Directory has #{length(directory)} entries"
+        )
+
         {nil, instance}
 
       entry ->
@@ -985,7 +1006,7 @@ defmodule ExPmtiles do
   defp handle_directory_entry_file(
          %{run_length: run_length} = entry,
          instance,
-         _tile_id,
+         tile_id,
          _dir_cache_path,
          _pending_directories_table,
          _depth
@@ -993,6 +1014,12 @@ defmodule ExPmtiles do
        when run_length > 0 do
     case get_bytes(instance, instance.header.tile_data_offset + entry.offset, entry.length) do
       nil ->
+        require Logger
+
+        Logger.warning(
+          "Failed to read tile data at offset #{instance.header.tile_data_offset + entry.offset}, length #{entry.length} for tile_id #{tile_id}"
+        )
+
         {nil, instance}
 
       response ->
