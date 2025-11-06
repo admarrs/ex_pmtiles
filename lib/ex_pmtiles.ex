@@ -545,49 +545,45 @@ defmodule ExPmtiles do
 
   # Read directory from cache file
   defp read_directory_from_cache(cache_file_path) do
-    try do
-      cache_file_path
-      |> File.read!()
-      |> :erlang.binary_to_term()
-    rescue
-      e ->
-        Logger.warning("Failed to read directory cache file #{cache_file_path}: #{inspect(e)}")
-        nil
-    end
+    cache_file_path
+    |> File.read!()
+    |> :erlang.binary_to_term()
+  rescue
+    e ->
+      Logger.warning("Failed to read directory cache file #{cache_file_path}: #{inspect(e)}")
+      nil
   end
 
   # Write directory to cache file
   defp write_directory_to_cache(cache_file_path, directory) do
-    try do
-      # Ensure directory exists (handle race conditions gracefully)
-      dir_path = Path.dirname(cache_file_path)
+    # Ensure directory exists (handle race conditions gracefully)
+    dir_path = Path.dirname(cache_file_path)
 
-      case File.mkdir_p(dir_path) do
-        :ok ->
-          :ok
+    case File.mkdir_p(dir_path) do
+      :ok ->
+        :ok
 
-        # Another process created it, that's fine
-        {:error, :eexist} ->
-          :ok
+      # Another process created it, that's fine
+      {:error, :eexist} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
-          throw({:mkdir_failed, reason})
-      end
-
-      # Write serialized directory
-      cache_file_path
-      |> File.write!(:erlang.term_to_binary(directory))
-
-      :ok
-    rescue
-      e ->
-        Logger.warning("Failed to write directory cache file #{cache_file_path}: #{inspect(e)}")
-        :error
-    catch
-      {:mkdir_failed, _reason} ->
-        :error
+      {:error, reason} ->
+        Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
+        throw({:mkdir_failed, reason})
     end
+
+    # Write serialized directory
+    cache_file_path
+    |> File.write!(:erlang.term_to_binary(directory))
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("Failed to write directory cache file #{cache_file_path}: #{inspect(e)}")
+      :error
+  catch
+    {:mkdir_failed, _reason} ->
+      :error
   end
 
   defp handle_directory_cache_miss(

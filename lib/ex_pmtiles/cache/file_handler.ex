@@ -20,14 +20,12 @@ defmodule ExPmtiles.Cache.FileHandler do
   Returns {:ok, tile_data} on success, :error on failure.
   """
   def read_tile_from_cache(cache_file_path) do
-    try do
-      tile_data = File.read!(cache_file_path)
-      {:ok, tile_data}
-    rescue
-      e ->
-        Logger.warning("Failed to read tile cache file #{cache_file_path}: #{inspect(e)}")
-        :error
-    end
+    tile_data = File.read!(cache_file_path)
+    {:ok, tile_data}
+  rescue
+    e ->
+      Logger.warning("Failed to read tile cache file #{cache_file_path}: #{inspect(e)}")
+      :error
   end
 
   @doc """
@@ -35,34 +33,32 @@ defmodule ExPmtiles.Cache.FileHandler do
   Returns :ok on success, :error on failure.
   """
   def write_tile_to_cache(cache_file_path, tile_data) do
-    try do
-      # Ensure directory exists (handle race conditions gracefully)
-      dir_path = Path.dirname(cache_file_path)
+    # Ensure directory exists (handle race conditions gracefully)
+    dir_path = Path.dirname(cache_file_path)
 
-      case File.mkdir_p(dir_path) do
-        :ok ->
-          :ok
+    case File.mkdir_p(dir_path) do
+      :ok ->
+        :ok
 
-        # Another process created it, that's fine
-        {:error, :eexist} ->
-          :ok
+      # Another process created it, that's fine
+      {:error, :eexist} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
-          throw({:mkdir_failed, reason})
-      end
-
-      # Write tile data directly (no serialization needed, it's already binary)
-      File.write!(cache_file_path, tile_data)
-      :ok
-    rescue
-      e ->
-        Logger.warning("Failed to write tile cache file #{cache_file_path}: #{inspect(e)}")
-        :error
-    catch
-      {:mkdir_failed, _reason} ->
-        :error
+      {:error, reason} ->
+        Logger.warning("Failed to create directory #{dir_path}: #{inspect(reason)}")
+        throw({:mkdir_failed, reason})
     end
+
+    # Write tile data directly (no serialization needed, it's already binary)
+    File.write!(cache_file_path, tile_data)
+    :ok
+  rescue
+    e ->
+      Logger.warning("Failed to write tile cache file #{cache_file_path}: #{inspect(e)}")
+      :error
+  catch
+    {:mkdir_failed, _reason} ->
+      :error
   end
 
   @doc """

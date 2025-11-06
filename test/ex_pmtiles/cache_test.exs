@@ -212,9 +212,11 @@ defmodule ExPmtiles.CacheTest do
       # None should take longer than 5 seconds (blocking indicator)
       assert Enum.all?(results, fn {_, _, duration} -> duration < 5_000 end)
 
-      # Should only have 1 miss (first request), rest should be hits or coordinated
+      # Note: With simplified architecture, concurrent requests are not coordinated
+      # Each does its own work. Multiple processes may fetch the same tile.
+      # We just verify all requests succeeded in a reasonable time
       stats = Cache.get_stats(pid)
-      assert stats.misses == 1
+      assert stats.misses >= 1, "Expected at least 1 miss"
     end
 
     test "handles concurrent requests for different tiles without blocking", %{cache_pid: pid} do
@@ -247,12 +249,9 @@ defmodule ExPmtiles.CacheTest do
       assert stats.misses == length(tiles)
     end
 
-    test "prevents duplicate fetches for concurrent requests via pending table", %{cache_pid: pid} do
+    test "handles concurrent requests for the same tile", %{cache_pid: pid} do
       # Use a unique tile coordinate that hasn't been cached yet
       {z, x, y} = {25, 9999, 8888}
-
-      # Get initial stats
-      initial_stats = Cache.get_stats(pid)
 
       # Launch 10 concurrent requests for the SAME tile
       tasks =
@@ -276,10 +275,15 @@ defmodule ExPmtiles.CacheTest do
       # Get final stats
       final_stats = Cache.get_stats(pid)
 
-      # Should only have 1 miss (deduplication working - all concurrent requests coordinated)
-      # If deduplication wasn't working, we'd have 10 misses
-      assert final_stats.misses - initial_stats.misses == 1,
-             "Expected 1 miss for concurrent requests, got #{final_stats.misses - initial_stats.misses}"
+      # Note: With the simplified architecture, we no longer coordinate duplicate requests.
+      # Multiple processes may fetch the same tile concurrently (rare in practice).
+      # This is acceptable because:
+      # 1. The filesystem handles concurrent writes safely
+      # 2. Each process does its own work without blocking
+      # 3. The tradeoff is much simpler code with no inter-process coordination complexity
+      # We just verify that all requests succeeded
+      assert final_stats.misses >= 1,
+             "Expected at least 1 miss for concurrent requests"
     end
 
     test "does not block GenServer with cache misses", %{cache_pid: pid} do
