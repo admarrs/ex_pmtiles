@@ -318,7 +318,8 @@ defmodule ExPmtiles.Cache.Operations do
 
     case result do
       {nil, _updated_pmtiles} ->
-        Logger.warning("Tile not found: #{z}/#{x}/#{y} (tile_id: #{tile_id})")
+        # Log at debug level since missing tiles are normal (sparse coverage)
+        Logger.debug("Tile not found: #{z}/#{x}/#{y} (tile_id: #{tile_id})")
         {:error, :tile_not_found}
 
       {{_offset, _length, tile_data}, _updated_pmtiles} ->
