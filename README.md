@@ -1,6 +1,7 @@
 [![CI](https://github.com/admarrs/ex_pmtiles/actions/workflows/ci.yml/badge.svg)](https://github.com/admarrs/ex_pmtiles/actions/workflows/ci.yml)
 [![License](https://img.shields.io/hexpm/l/ex_pmtiles.svg)](https://github.com/admarrs/ex_pmtiles/main/LICENSE.md)
 [![Version](https://img.shields.io/hexpm/v/ex_pmtiles.svg)](https://hex.pm/packages/ex_pmtiles)
+[![Hex Docs](https://img.shields.io/badge/documentation-gray.svg)](https://hexdocs.pm/ex_pmtiles)
 
 # ExPmtiles
 
