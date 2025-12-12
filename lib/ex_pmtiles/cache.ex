@@ -550,25 +550,24 @@ defmodule ExPmtiles.Cache do
         Path.join(System.tmp_dir!(), "ex_pmtiles_cache")
       )
 
-    cache_path = Path.join(base_cache_dir, Atom.to_string(server_name))
-
     # Only create the cache directory structure if either caching mode is enabled
-    if enable_tile_cache or enable_dir_cache do
-      FileHandler.init_cache_directories(cache_path, enable_tile_cache, enable_dir_cache)
+    cache_path = if enable_tile_cache or enable_dir_cache do
+      path = Path.join(base_cache_dir, Atom.to_string(server_name))
+      FileHandler.init_cache_directories(path, enable_tile_cache, enable_dir_cache)
 
       if enable_tile_cache do
-        Logger.info("File-based tile caching enabled at #{cache_path}")
+        Logger.info("File-based tile caching enabled at #{path}")
       else
         Logger.info("Tile caching disabled - tiles will not be cached")
       end
 
       if enable_dir_cache do
-        Logger.info("File-based directory caching enabled at #{cache_path}")
+        Logger.info("File-based directory caching enabled at #{path}")
       else
         Logger.info("Directory caching disabled")
       end
 
-      cache_path
+      path
     else
       nil
     end
