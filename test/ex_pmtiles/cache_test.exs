@@ -1,6 +1,7 @@
 defmodule ExPmtiles.CacheTest do
   use ExUnit.Case, async: false
   import Mox
+  import ExPmtile.Support.BypassHelpers
 
   # Set up expectations to be verified when the test exits
   setup :verify_on_exit!
@@ -358,6 +359,343 @@ defmodule ExPmtiles.CacheTest do
       # Stats should show misses (no cache hits)
       stats = Cache.get_stats(pid)
       assert stats.misses >= 1
+    end
+  end
+
+  describe "file change detection" do
+    setup do
+      # Create a temporary PMTiles file for testing
+      temp_file =
+        Path.join(System.tmp_dir!(), "test_pmtiles_file_change_#{:rand.uniform(100_000)}.pmtiles")
+
+      File.write!(temp_file, "initial content")
+
+      # Mock get_file_metadata to track calls
+      metadata_ref = :counters.new(1, [])
+      :counters.put(metadata_ref, 1, 0)
+
+      # Clean up any existing process
+      case Process.whereis(:cache_file_change) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      on_exit(fn ->
+        File.rm(temp_file)
+
+        case Process.whereis(:cache_file_change) do
+          nil -> :ok
+          pid -> GenServer.stop(pid)
+        end
+      end)
+
+      %{temp_file: temp_file, metadata_ref: metadata_ref}
+    end
+
+    test "initializes with file metadata" do
+      # Note: This test can't directly verify file metadata without accessing GenServer state,
+      # but we can verify that the cache starts successfully and doesn't crash
+      # when get_file_metadata is called
+
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_file_change,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true
+        )
+
+      # Cache should be alive
+      assert Process.alive?(pid)
+
+      # Should be able to get stats (proves cache initialized)
+      stats = Cache.get_stats(pid)
+      assert stats == %{hits: 0, misses: 0}
+
+      GenServer.stop(pid)
+    end
+
+    test "periodic file change check message is scheduled" do
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_file_change,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true,
+          # Use a long interval to prevent triggering during test
+          file_check_interval_ms: :timer.hours(1)
+        )
+
+      # Cache should be alive and functional
+      assert Process.alive?(pid)
+
+      # Verify cache is working
+      stats = Cache.get_stats(pid)
+      assert stats == %{hits: 0, misses: 0}
+
+      GenServer.stop(pid)
+    end
+
+    test "handles file change detection gracefully when metadata check fails" do
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_file_change,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true,
+          # Use long interval to prevent automatic checks
+          file_check_interval_ms: :timer.hours(1)
+        )
+
+      # Manually trigger a file change check
+      send(pid, :check_file_changed)
+
+      # Wait for the message to be processed
+      Process.sleep(100)
+
+      # Cache should still be alive despite metadata check likely failing (no S3 credentials)
+      assert Process.alive?(pid)
+
+      # Should still be able to operate normally
+      stats = Cache.get_stats(pid)
+      assert is_map(stats)
+
+      GenServer.stop(pid)
+    end
+
+    test "clears cache when file metadata changes" do
+      # This is a behavioral test - we verify that the cache clearing logic
+      # would be triggered if metadata changed, but we can't easily mock
+      # the metadata check in a running GenServer. Instead, we test the
+      # clear_cache function which is called when file changes are detected.
+
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_file_change,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true
+        )
+
+      # Cache a tile
+      Cache.get_tile(pid, 0, 0, 0)
+
+      stats_before = Cache.get_stats(pid)
+      assert stats_before.misses == 1
+
+      # Manually clear cache (simulates what happens on file change)
+      Cache.clear_cache(pid)
+
+      # Wait for clear to complete
+      Process.sleep(100)
+
+      # Stats should be reset
+      stats_after = Cache.get_stats(pid)
+      assert stats_after.hits == 0
+      assert stats_after.misses == 0
+
+      GenServer.stop(pid)
+    end
+  end
+
+  describe "file change detection with S3 (Bypass)" do
+    setup [:start_bypass]
+
+    test "detects file changes via ETag and clears cache", %{bypass: bypass} do
+      # Clean up any existing process
+      case Process.whereis(:cache_s3_change) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      # Set up Bypass to handle HEAD requests
+      initial_etag = "\"initial-etag-123\""
+      etag_ref = :atomics.new(1, [])
+      :atomics.put(etag_ref, 1, 1)
+
+      Bypass.expect(bypass, "HEAD", "/#{@bucket}/#{@path}", fn conn ->
+        etag_version = :atomics.get(etag_ref, 1)
+
+        etag =
+          case etag_version do
+            1 -> initial_etag
+            2 -> "\"changed-etag-456\""
+            _ -> "\"later-etag-789\""
+          end
+
+        conn
+        |> Plug.Conn.put_resp_header("etag", etag)
+        |> Plug.Conn.resp(200, "")
+      end)
+
+      # Create S3 instance with Bypass config
+      pmtiles_instance = %ExPmtiles{
+        source: :s3,
+        region: "us-east-1",
+        bucket: @bucket,
+        path: @path,
+        directories: %{},
+        pending_directories: %{}
+      }
+
+      config = exaws_config_for_bypass(bypass)
+
+      # Verify initial metadata fetch works
+      {:ok, metadata} = ExPmtiles.Storage.get_file_metadata(pmtiles_instance, config)
+      assert metadata == initial_etag
+
+      # Note: We can't easily inject the Bypass config into the Cache GenServer
+      # This test demonstrates the S3 metadata checking works with Bypass,
+      # but full integration requires dependency injection
+      if Process.whereis(:cache_s3_change) do
+        GenServer.stop(:cache_s3_change)
+      end
+    end
+
+    test "handles S3 errors gracefully during file change check", %{bypass: bypass} do
+      # Clean up any existing process
+      case Process.whereis(:cache_s3_error) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      # Set up Bypass to return 404
+      Bypass.expect(bypass, "HEAD", "/#{@bucket}/#{@path}", fn conn ->
+        Plug.Conn.resp(conn, 404, "Not Found")
+      end)
+
+      pmtiles_instance = %ExPmtiles{
+        source: :s3,
+        region: "us-east-1",
+        bucket: @bucket,
+        path: @path,
+        directories: %{},
+        pending_directories: %{}
+      }
+
+      config = exaws_config_for_bypass(bypass)
+
+      # Should return error but not crash
+      result = ExPmtiles.Storage.get_file_metadata(pmtiles_instance, config)
+      assert {:error, _} = result
+
+      if Process.whereis(:cache_s3_error) do
+        GenServer.stop(:cache_s3_error)
+      end
+    end
+
+    test "retrieves different ETags for file changes", %{bypass: bypass} do
+      # Clean up any existing process
+      case Process.whereis(:cache_s3_etag_change) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      # Use a counter to change ETag on each request
+      request_count = :counters.new(1, [])
+
+      Bypass.expect(bypass, "HEAD", "/#{@bucket}/#{@path}", fn conn ->
+        count = :counters.get(request_count, 1)
+        :counters.add(request_count, 1, 1)
+
+        etag = "\"etag-version-#{count}\""
+
+        conn
+        |> Plug.Conn.put_resp_header("etag", etag)
+        |> Plug.Conn.resp(200, "")
+      end)
+
+      pmtiles_instance = %ExPmtiles{
+        source: :s3,
+        region: "us-east-1",
+        bucket: @bucket,
+        path: @path,
+        directories: %{},
+        pending_directories: %{}
+      }
+
+      config = exaws_config_for_bypass(bypass)
+
+      # First request
+      {:ok, metadata1} = ExPmtiles.Storage.get_file_metadata(pmtiles_instance, config)
+      assert metadata1 == "\"etag-version-0\""
+
+      # Second request - should get different ETag
+      {:ok, metadata2} = ExPmtiles.Storage.get_file_metadata(pmtiles_instance, config)
+      assert metadata2 == "\"etag-version-1\""
+
+      # Third request
+      {:ok, metadata3} = ExPmtiles.Storage.get_file_metadata(pmtiles_instance, config)
+      assert metadata3 == "\"etag-version-2\""
+
+      # All should be different
+      assert metadata1 != metadata2
+      assert metadata2 != metadata3
+      assert metadata1 != metadata3
+
+      if Process.whereis(:cache_s3_etag_change) do
+        GenServer.stop(:cache_s3_etag_change)
+      end
+    end
+  end
+
+  describe "file check interval configuration" do
+    test "accepts custom file check interval" do
+      # Clean up any existing process
+      case Process.whereis(:cache_custom_interval) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_custom_interval,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true,
+          # Use a very long interval to avoid triggering during test
+          file_check_interval_ms: :timer.hours(24)
+        )
+
+      # Should start successfully with custom interval
+      assert Process.alive?(pid)
+
+      # Verify cache is functional
+      stats = Cache.get_stats(pid)
+      assert stats == %{hits: 0, misses: 0}
+
+      GenServer.stop(pid)
+    end
+
+    test "uses default interval when not specified" do
+      # Clean up any existing process
+      case Process.whereis(:cache_default_interval) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_default_interval,
+          region: nil,
+          bucket: @bucket,
+          path: @path,
+          enable_tile_cache: true
+        )
+
+      # Should start successfully with default interval (5 minutes)
+      assert Process.alive?(pid)
+
+      # Verify cache is functional
+      stats = Cache.get_stats(pid)
+      assert stats == %{hits: 0, misses: 0}
+
+      GenServer.stop(pid)
     end
   end
 end

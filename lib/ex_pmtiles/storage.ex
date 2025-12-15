@@ -46,6 +46,120 @@ defmodule ExPmtiles.Storage do
   require Logger
 
   @doc """
+  Retrieves file metadata for change detection.
+
+  For S3 files, this returns the ETag which changes when the file is updated.
+  For local files, this returns the last modified timestamp.
+
+  ## Parameters
+
+  - `instance` - The PMTiles instance containing storage configuration
+  - `config` - Optional ExAws config (primarily for testing with Bypass)
+
+  ## Returns
+
+  - `{:ok, metadata}` - A string representing the file's current state (ETag or timestamp)
+  - `{:error, reason}` - If metadata cannot be retrieved
+
+  ## Examples
+
+      iex> instance = %ExPmtiles{source: :s3, bucket: "bucket", path: "file.pmtiles"}
+      iex> ExPmtiles.Storage.get_file_metadata(instance)
+      {:ok, "\"abc123def456\""}
+
+      iex> instance = %ExPmtiles{source: :local, path: "test.pmtiles"}
+      iex> ExPmtiles.Storage.get_file_metadata(instance)
+      {:ok, "1702838400"}
+  """
+  def get_file_metadata(instance, config \\ nil)
+
+  def get_file_metadata(%{source: source} = instance, config) do
+    case source do
+      :s3 -> get_s3_metadata(instance, config)
+      :local -> get_local_metadata(instance)
+    end
+  end
+
+  def get_file_metadata(%{storage: storage} = instance, config) when storage == :s3 do
+    get_s3_metadata(instance, config)
+  end
+
+  def get_file_metadata(%{storage: storage} = instance, _config) when storage == :local do
+    get_local_metadata(instance)
+  end
+
+  def get_file_metadata(_instance, _config) do
+    # For test mocks or instances without source/storage field, return error
+    {:error, :unsupported_instance}
+  end
+
+  defp get_s3_metadata(instance, config) do
+    timeout = Application.get_env(:ex_pmtiles, :http_timeout, 15_000)
+
+    try do
+      result =
+        if config do
+          # Use provided config (for testing)
+          ExAws.S3.head_object(instance.bucket, instance.path)
+          |> ExAws.request(config)
+        else
+          # Use default config
+          ExAws.S3.head_object(instance.bucket, instance.path)
+          |> request(instance.region, timeout)
+        end
+
+      case result do
+        {:ok, %{headers: headers}} ->
+          # Extract ETag from headers
+          etag =
+            headers
+            |> Enum.find_value(fn
+              {"ETag", value} -> value
+              {"etag", value} -> value
+              _ -> nil
+            end)
+
+          if etag do
+            {:ok, etag}
+          else
+            {:error, :etag_not_found}
+          end
+
+        {:error, error} ->
+          {:error, error}
+      end
+    rescue
+      e in ArgumentError ->
+        # Handle cases where ExAws ETS tables don't exist (e.g., in tests)
+        {:error, {:aws_not_available, Exception.message(e)}}
+
+      e ->
+        {:error, {:unexpected_error, Exception.message(e)}}
+    catch
+      # Catch exits from GenServer calls (e.g., ExAws.Config.AuthCache timeouts/crashes)
+      :exit, reason ->
+        {:error, {:aws_auth_failed, reason}}
+    end
+  end
+
+  defp get_local_metadata(instance) do
+    case File.stat(instance.path) do
+      {:ok, %File.Stat{mtime: mtime}} ->
+        # Convert mtime tuple to Unix timestamp for comparison
+        timestamp =
+          mtime
+          |> :calendar.datetime_to_gregorian_seconds()
+          |> Kernel.-(62_167_219_200)
+          |> Integer.to_string()
+
+        {:ok, timestamp}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  @doc """
   Retrieves a range of bytes from a PMTiles file.
 
   This function automatically routes to the appropriate storage backend based on

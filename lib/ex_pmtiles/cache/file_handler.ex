@@ -80,10 +80,10 @@ defmodule ExPmtiles.Cache.FileHandler do
     case File.rm_rf(tile_cache_dir) do
       {:ok, _} ->
         File.mkdir_p!(tile_cache_dir)
-        Logger.info("Cleared tile cache at #{tile_cache_dir}")
+        Logger.debug("Cleared tile cache at #{tile_cache_dir}")
 
       {:error, reason, _} ->
-        Logger.warning("Failed to clear tile cache at #{tile_cache_dir}: #{inspect(reason)}")
+        Logger.debug("Failed to clear tile cache at #{tile_cache_dir}: #{inspect(reason)}")
     end
   end
 
@@ -96,10 +96,10 @@ defmodule ExPmtiles.Cache.FileHandler do
     case File.rm_rf(dir_cache_dir) do
       {:ok, _} ->
         File.mkdir_p!(dir_cache_dir)
-        Logger.info("Cleared directory cache at #{dir_cache_dir}")
+        Logger.debug("Cleared directory cache at #{dir_cache_dir}")
 
       {:error, reason, _} ->
-        Logger.warning("Failed to clear directory cache at #{dir_cache_dir}: #{inspect(reason)}")
+        Logger.debug("Failed to clear directory cache at #{dir_cache_dir}: #{inspect(reason)}")
     end
   end
 

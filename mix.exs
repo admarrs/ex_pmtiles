@@ -2,13 +2,14 @@ defmodule ExPmtiles.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/admarrs/ex_pmtiles"
-  @version "0.3.1"
+  @version "0.3.2"
 
   def project do
     [
       app: :ex_pmtiles,
       version: @version,
       elixir: "~> 1.17",
+      elixirc_paths: elixirc_paths(Mix.env()),
       name: "ExPmtiles",
       source_url: @source_url,
       aliases: aliases(),
@@ -26,6 +27,10 @@ defmodule ExPmtiles.MixProject do
       ]
     ]
   end
+
+  # Specifies which paths to compile per environment
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help compile.app" to learn about applications.
   def application do
@@ -51,6 +56,7 @@ defmodule ExPmtiles.MixProject do
       # test deps
       {:excoveralls, "~> 0.18", only: :test},
       {:mox, "~> 1.0", only: :test},
+      {:bypass, "~> 2.1", only: :test},
       {:benchee, "~> 1.0", only: [:dev, :test]},
 
       # dev & test deps
@@ -61,7 +67,13 @@ defmodule ExPmtiles.MixProject do
 
   defp aliases do
     [
-      precommit: ["compile --warning-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warning-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "credo --strict",
+        "test"
+      ]
     ]
   end
 

@@ -39,6 +39,8 @@ defmodule ExPmtiles.Cache do
   - `:max_cache_age_ms` - Maximum age of cache in milliseconds before automatic clearing (default: nil, disabled).
     When set, clears cache on GenServer startup and periodically based on age.
   - `:cleanup_interval_ms` - Interval for checking cache age in milliseconds (default: 1 hour)
+  - `:file_check_interval_ms` - Interval for checking if source file has changed (default: 5 minutes).
+    When the file changes (detected via ETag for S3 or mtime for local), cache is automatically cleared and repopulated.
 
   ## Usage
 
@@ -56,6 +58,14 @@ defmodule ExPmtiles.Cache do
     enable_tile_cache: true,
     max_cache_age_ms: :timer.hours(24),
     cleanup_interval_ms: :timer.hours(1)
+  )
+
+  # Start with custom file change detection interval
+  {:ok, pid} = ExPmtiles.Cache.start_link(
+    bucket: "maps",
+    path: "map.pmtiles",
+    enable_dir_cache: true,
+    file_check_interval_ms: :timer.minutes(1)  # Check for file changes every minute
   )
 
   # Get a tile by coordinates
@@ -94,6 +104,8 @@ defmodule ExPmtiles.Cache do
   - **Race condition handling**: Safe concurrent writes to cache files
   - **Automatic cache clearing**: Optional time-based cache expiration with configurable intervals
   - **Smart repopulation**: Directory cache automatically repopulates after clearing
+  - **File change detection**: Automatically detects when the source PMTiles file changes (via ETag for S3 or mtime for local files)
+    and invalidates all caches, preventing stale or corrupted data from being served
   """
   use GenServer
   require Logger
@@ -123,6 +135,7 @@ defmodule ExPmtiles.Cache do
     - `:enable_tile_cache` - Enable file-based tile caching (default: false)
     - `:max_cache_age_ms` - Maximum age of cache before automatic clearing (default: nil, disabled). When set, clears cache on startup.
     - `:cleanup_interval_ms` - Interval for checking cache age (default: 1 hour)
+    - `:file_check_interval_ms` - Interval for checking if source file has changed (default: 5 minutes)
 
   ## Returns
 
@@ -368,7 +381,7 @@ defmodule ExPmtiles.Cache do
         cache_config
       )
 
-      Logger.info("Triggered background directory cache population after clearing")
+      Logger.debug("Triggered background directory cache population after clearing")
     end
 
     state =
@@ -399,6 +412,12 @@ defmodule ExPmtiles.Cache do
         state
       end
 
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:check_file_changed, state) do
+    state = check_and_handle_file_change(state)
     {:noreply, state}
   end
 
@@ -438,13 +457,83 @@ defmodule ExPmtiles.Cache do
         cache_config
       )
 
-      Logger.info("Triggered background directory cache population after automatic clearing")
+      Logger.debug("Triggered background directory cache population after automatic clearing")
     end
   end
 
   defp should_trigger_dir_population?(state) do
     state.enable_dir_cache and @env != :test and not is_nil(state.bucket) and
       not is_nil(state.path)
+  end
+
+  defp check_and_handle_file_change(state) do
+    case ExPmtiles.Storage.get_file_metadata(state.pmtiles) do
+      {:ok, current_metadata} ->
+        handle_metadata_result(state, current_metadata)
+
+      {:error, reason} ->
+        Logger.debug(
+          "Failed to check file metadata for #{state.name}: #{inspect(reason)}. Skipping file change check."
+        )
+
+        state
+    end
+  end
+
+  defp handle_metadata_result(state, current_metadata) do
+    cond do
+      file_changed?(state, current_metadata) ->
+        handle_file_change(state, current_metadata)
+
+      is_nil(state.file_metadata) ->
+        %{state | file_metadata: current_metadata}
+
+      true ->
+        state
+    end
+  end
+
+  defp file_changed?(state, current_metadata) do
+    state.file_metadata && current_metadata != state.file_metadata
+  end
+
+  defp handle_file_change(state, new_metadata) do
+    Logger.warning(
+      "PMTiles file changed detected for #{state.name}. Old metadata: #{state.file_metadata}, New metadata: #{new_metadata}. Clearing cache..."
+    )
+
+    # File has changed - clear cache and re-initialize
+    FileHandler.clear_cache_files(state.cache_path)
+    reset_stats(state.stats_table)
+
+    # Clear in-memory directories in the pmtiles struct
+    pmtiles = %{state.pmtiles | directories: %{}, pending_directories: %{}}
+
+    # Trigger background directory cache population if conditions are met
+    trigger_dir_population_on_file_change(state, pmtiles)
+
+    %{
+      state
+      | file_metadata: new_metadata,
+        pmtiles: pmtiles,
+        cache_start_time: System.monotonic_time(:millisecond)
+    }
+  end
+
+  defp trigger_dir_population_on_file_change(state, pmtiles) do
+    if should_trigger_dir_population?(state) do
+      cache_config = build_cache_config(state)
+
+      trigger_background_dir_population(
+        pmtiles,
+        state.name,
+        state.bucket,
+        state.path,
+        cache_config
+      )
+
+      Logger.debug("Triggered background directory cache population after file change detection")
+    end
   end
 
   @impl true
@@ -476,7 +565,7 @@ defmodule ExPmtiles.Cache do
   defp reset_stats(stats_table) do
     :ets.insert(stats_table, {:hits, 0})
     :ets.insert(stats_table, {:misses, 0})
-    Logger.info("Reset cache statistics")
+    Logger.debug("Reset cache statistics")
   end
 
   defp build_cache_config(state) do
@@ -494,11 +583,27 @@ defmodule ExPmtiles.Cache do
     enable_tile_cache = Keyword.get(opts, :enable_tile_cache, false)
     max_cache_age_ms = Keyword.get(opts, :max_cache_age_ms)
     cleanup_interval_ms = Keyword.get(opts, :cleanup_interval_ms, :timer.hours(1))
+    file_check_interval_ms = Keyword.get(opts, :file_check_interval_ms, :timer.minutes(5))
 
     Logger.info("Initializing PMTiles cache for #{bucket}/#{path} with name #{server_name}")
 
     cache_config =
       init_cache(table_name, server_name, enable_dir_cache, enable_tile_cache)
+
+    # Get initial file metadata for change detection
+    file_metadata =
+      case ExPmtiles.Storage.get_file_metadata(pmtiles) do
+        {:ok, metadata} ->
+          Logger.debug("Initial file metadata for #{server_name}: #{metadata}")
+          metadata
+
+        {:error, reason} ->
+          Logger.debug(
+            "Failed to get initial file metadata for #{server_name}: #{inspect(reason)}"
+          )
+
+          nil
+      end
 
     # If max_cache_age_ms is set, clear existing cache on startup
     # Run the clearing in a task and await it to ensure it completes before background population
@@ -509,7 +614,7 @@ defmodule ExPmtiles.Cache do
         end)
 
       Task.await(task, :infinity)
-      Logger.info("Cleared existing cache on startup (max_cache_age_ms is configured)")
+      Logger.debug("Cleared existing cache on startup (max_cache_age_ms is configured)")
     end
 
     pmtiles = start_background_cache_population(pmtiles, server_name, bucket, path, cache_config)
@@ -518,10 +623,15 @@ defmodule ExPmtiles.Cache do
     if max_cache_age_ms do
       :timer.send_interval(cleanup_interval_ms, :cleanup_old_cache)
 
-      Logger.info(
+      Logger.debug(
         "Automatic cache clearing enabled: max age #{max_cache_age_ms}ms, check interval #{cleanup_interval_ms}ms"
       )
     end
+
+    # Schedule periodic file change detection
+    :timer.send_interval(file_check_interval_ms, :check_file_changed)
+
+    Logger.debug("File change detection enabled: check interval #{file_check_interval_ms}ms")
 
     {:ok,
      %{
@@ -536,7 +646,8 @@ defmodule ExPmtiles.Cache do
        enable_dir_cache: enable_dir_cache,
        enable_tile_cache: enable_tile_cache,
        max_cache_age_ms: max_cache_age_ms,
-       cache_start_time: System.monotonic_time(:millisecond)
+       cache_start_time: System.monotonic_time(:millisecond),
+       file_metadata: file_metadata
      }}
   end
 
@@ -551,26 +662,27 @@ defmodule ExPmtiles.Cache do
       )
 
     # Only create the cache directory structure if either caching mode is enabled
-    cache_path = if enable_tile_cache or enable_dir_cache do
-      path = Path.join(base_cache_dir, Atom.to_string(server_name))
-      FileHandler.init_cache_directories(path, enable_tile_cache, enable_dir_cache)
+    cache_path =
+      if enable_tile_cache or enable_dir_cache do
+        path = Path.join(base_cache_dir, Atom.to_string(server_name))
+        FileHandler.init_cache_directories(path, enable_tile_cache, enable_dir_cache)
 
-      if enable_tile_cache do
-        Logger.info("File-based tile caching enabled at #{path}")
+        if enable_tile_cache do
+          Logger.debug("File-based tile caching enabled at #{path}")
+        else
+          Logger.debug("Tile caching disabled - tiles will not be cached")
+        end
+
+        if enable_dir_cache do
+          Logger.debug("File-based directory caching enabled at #{path}")
+        else
+          Logger.debug("Directory caching disabled")
+        end
+
+        path
       else
-        Logger.info("Tile caching disabled - tiles will not be cached")
+        nil
       end
-
-      if enable_dir_cache do
-        Logger.info("File-based directory caching enabled at #{path}")
-      else
-        Logger.info("Directory caching disabled")
-      end
-
-      path
-    else
-      nil
-    end
 
     # Stats table for tracking hits/misses
     stats_table = :"#{table_name}_stats"
@@ -595,9 +707,9 @@ defmodule ExPmtiles.Cache do
     # Pre-fetch root directory in background without blocking startup
     if @env != :test do
       trigger_background_dir_population(pmtiles, server_name, bucket, path, cache_config)
-      Logger.info("Directory caching enabled (background pre-fetch + on-demand)")
+      Logger.debug("Directory caching enabled (background pre-fetch + on-demand)")
     else
-      Logger.info("Directory caching enabled (on-demand fetching only)")
+      Logger.debug("Directory caching enabled (on-demand fetching only)")
     end
 
     pmtiles
@@ -605,7 +717,7 @@ defmodule ExPmtiles.Cache do
 
   defp start_background_cache_population(pmtiles, _server_name, _bucket, _path, _cache_configs) do
     # Bucket or path is nil (e.g., local files), skip pre-fetch
-    Logger.info("Directory caching enabled (on-demand fetching)")
+    Logger.debug("Directory caching enabled (on-demand fetching)")
     pmtiles
   end
 
@@ -618,7 +730,7 @@ defmodule ExPmtiles.Cache do
       try do
         header = pmtiles.header
 
-        Logger.info(
+        Logger.debug(
           "Starting background directory pre-cache for #{bucket}/#{path} (#{server_name})"
         )
 
@@ -658,10 +770,10 @@ defmodule ExPmtiles.Cache do
           end
         end)
 
-        Logger.info("Root directory pre-cached successfully")
+        Logger.debug("Root directory pre-cached successfully")
       rescue
         e ->
-          Logger.warning("Failed to pre-cache root directory: #{inspect(e)}")
+          Logger.debug("Failed to pre-cache root directory: #{inspect(e)}")
           Logger.debug(Exception.format_stacktrace(__STACKTRACE__))
       end
     end)
