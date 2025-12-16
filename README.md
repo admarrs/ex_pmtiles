@@ -29,7 +29,7 @@ Add `ex_pmtiles` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_pmtiles, "~> 0.3.2"}
+    {:ex_pmtiles, "~> 0.3.3"}
   ]
 end
 ```

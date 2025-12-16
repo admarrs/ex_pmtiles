@@ -70,7 +70,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
     %{config: config, stats_table: stats_table, pmtiles: pmtiles}
   end
 
-  describe "handle_cached_tile_request/6" do
+  describe "handle_cached_tile_request/7" do
     test "returns cached tile on cache hit", %{config: config, pmtiles: pmtiles} do
       tile_id = 10_001_001
       z = 10
@@ -83,7 +83,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
       FileHandler.write_tile_to_cache(tile_path, tile_data)
 
       result =
-        Operations.handle_cached_tile_request(pmtiles, tile_id, z, x, y, config)
+        Operations.handle_cached_tile_request(pmtiles, tile_id, z, x, y, config, false)
 
       assert result == {:ok, tile_data}
 
@@ -101,7 +101,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
       # Don't pre-populate cache
 
       result =
-        Operations.handle_cached_tile_request(pmtiles, tile_id, z, x, y, config)
+        Operations.handle_cached_tile_request(pmtiles, tile_id, z, x, y, config, false)
 
       # Should fetch from PMTiles and return data
       assert result == {:ok, "tile_data_#{z}_#{x}_#{y}"}
@@ -112,7 +112,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
     end
   end
 
-  describe "handle_tile_request/7" do
+  describe "handle_tile_request/8" do
     test "routes to cached handler when tile caching enabled", %{config: config, pmtiles: pmtiles} do
       tile_id = 20_005_005
       z = 20
@@ -123,7 +123,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
       tile_path = FileHandler.tile_cache_file_path(config.cache_path, tile_id)
       FileHandler.write_tile_to_cache(tile_path, "cached_data")
 
-      result = Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, true)
+      result = Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, true, false)
 
       assert result == {:ok, "cached_data"}
 
@@ -138,7 +138,7 @@ defmodule ExPmtiles.Cache.OperationsTest do
       x = 6
       y = 6
 
-      result = Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, false)
+      result = Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, false, false)
 
       assert result == {:ok, "tile_data_#{z}_#{x}_#{y}"}
 

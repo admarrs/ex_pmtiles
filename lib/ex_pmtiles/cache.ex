@@ -136,6 +136,7 @@ defmodule ExPmtiles.Cache do
     - `:max_cache_age_ms` - Maximum age of cache before automatic clearing (default: nil, disabled). When set, clears cache on startup.
     - `:cleanup_interval_ms` - Interval for checking cache age (default: 1 hour)
     - `:file_check_interval_ms` - Interval for checking if source file has changed (default: 5 minutes)
+    - `:exaws_config` - ExAws config for testing (default: nil, uses default config)
 
   ## Returns
 
@@ -215,7 +216,8 @@ defmodule ExPmtiles.Cache do
 
       pid ->
         # Get PMTiles struct and configuration from server
-        {pmtiles, enable_tile_cache, cache_path} = GenServer.call(pid, :get_config, 5000)
+        {pmtiles, enable_tile_cache, enable_dir_cache, cache_path} =
+          GenServer.call(pid, :get_config, 5000)
 
         config = %{
           stats: :"#{table_name}_stats",
@@ -231,7 +233,8 @@ defmodule ExPmtiles.Cache do
           x,
           y,
           config,
-          enable_tile_cache
+          enable_tile_cache,
+          enable_dir_cache
         )
     end
   end
@@ -248,7 +251,8 @@ defmodule ExPmtiles.Cache do
     tile_id = pmtiles_module().zxy_to_tile_id(z, x, y)
 
     # Get PMTiles struct and configuration from server
-    {pmtiles, enable_tile_cache, cache_path} = GenServer.call(server, :get_config, 5000)
+    {pmtiles, enable_tile_cache, enable_dir_cache, cache_path} =
+      GenServer.call(server, :get_config, 5000)
 
     config = %{
       stats: :"#{table_name}_stats",
@@ -257,7 +261,16 @@ defmodule ExPmtiles.Cache do
     }
 
     # Do all the work in the calling process (Phoenix request process)
-    Operations.handle_tile_request(pmtiles, tile_id, z, x, y, config, enable_tile_cache)
+    Operations.handle_tile_request(
+      pmtiles,
+      tile_id,
+      z,
+      x,
+      y,
+      config,
+      enable_tile_cache,
+      enable_dir_cache
+    )
   end
 
   @doc """
@@ -353,7 +366,8 @@ defmodule ExPmtiles.Cache do
   @impl true
   def handle_call(:get_config, _from, state) do
     # Return PMTiles struct and configuration for the caller to use
-    {:reply, {state.pmtiles, state.enable_tile_cache, state.cache_path}, state}
+    {:reply, {state.pmtiles, state.enable_tile_cache, state.enable_dir_cache, state.cache_path},
+     state}
   end
 
   @impl true
@@ -467,7 +481,7 @@ defmodule ExPmtiles.Cache do
   end
 
   defp check_and_handle_file_change(state) do
-    case ExPmtiles.Storage.get_file_metadata(state.pmtiles) do
+    case ExPmtiles.Storage.get_file_metadata(state.pmtiles, state.exaws_config) do
       {:ok, current_metadata} ->
         handle_metadata_result(state, current_metadata)
 
@@ -579,7 +593,7 @@ defmodule ExPmtiles.Cache do
 
   defp setup_cache_server(pmtiles, server_name, bucket, path, opts) do
     table_name = table_name_for(server_name)
-    enable_dir_cache = Keyword.get(opts, :enable_dir_cache, true)
+    enable_dir_cache = Keyword.get(opts, :enable_dir_cache, false)
     enable_tile_cache = Keyword.get(opts, :enable_tile_cache, false)
     max_cache_age_ms = Keyword.get(opts, :max_cache_age_ms)
     cleanup_interval_ms = Keyword.get(opts, :cleanup_interval_ms, :timer.hours(1))
@@ -590,19 +604,26 @@ defmodule ExPmtiles.Cache do
     cache_config =
       init_cache(table_name, server_name, enable_dir_cache, enable_tile_cache)
 
-    # Get initial file metadata for change detection
+    # Get ExAws config for testing (only used in tests)
+    exaws_config = Keyword.get(opts, :exaws_config)
+
+    # Only get file metadata if caching is enabled (needed for change detection)
     file_metadata =
-      case ExPmtiles.Storage.get_file_metadata(pmtiles) do
-        {:ok, metadata} ->
-          Logger.debug("Initial file metadata for #{server_name}: #{metadata}")
-          metadata
+      if enable_dir_cache or enable_tile_cache do
+        case ExPmtiles.Storage.get_file_metadata(pmtiles, exaws_config) do
+          {:ok, metadata} ->
+            Logger.debug("Initial file metadata for #{server_name}: #{metadata}")
+            metadata
 
-        {:error, reason} ->
-          Logger.debug(
-            "Failed to get initial file metadata for #{server_name}: #{inspect(reason)}"
-          )
+          {:error, reason} ->
+            Logger.debug(
+              "Failed to get initial file metadata for #{server_name}: #{inspect(reason)}"
+            )
 
-          nil
+            nil
+        end
+      else
+        nil
       end
 
     # If max_cache_age_ms is set, clear existing cache on startup
@@ -617,7 +638,15 @@ defmodule ExPmtiles.Cache do
       Logger.debug("Cleared existing cache on startup (max_cache_age_ms is configured)")
     end
 
-    pmtiles = start_background_cache_population(pmtiles, server_name, bucket, path, cache_config)
+    pmtiles =
+      start_background_cache_population(
+        pmtiles,
+        server_name,
+        bucket,
+        path,
+        cache_config,
+        enable_dir_cache
+      )
 
     # Schedule periodic cleanup if max_cache_age_ms is set
     if max_cache_age_ms do
@@ -628,10 +657,12 @@ defmodule ExPmtiles.Cache do
       )
     end
 
-    # Schedule periodic file change detection
-    :timer.send_interval(file_check_interval_ms, :check_file_changed)
+    # Only schedule file change detection if caching is enabled
+    if enable_dir_cache or enable_tile_cache do
+      :timer.send_interval(file_check_interval_ms, :check_file_changed)
 
-    Logger.debug("File change detection enabled: check interval #{file_check_interval_ms}ms")
+      Logger.debug("File change detection enabled: check interval #{file_check_interval_ms}ms")
+    end
 
     {:ok,
      %{
@@ -647,7 +678,8 @@ defmodule ExPmtiles.Cache do
        enable_tile_cache: enable_tile_cache,
        max_cache_age_ms: max_cache_age_ms,
        cache_start_time: System.monotonic_time(:millisecond),
-       file_metadata: file_metadata
+       file_metadata: file_metadata,
+       exaws_config: exaws_config
      }}
   end
 
@@ -702,22 +734,44 @@ defmodule ExPmtiles.Cache do
     }
   end
 
-  defp start_background_cache_population(pmtiles, server_name, bucket, path, cache_config)
-       when not is_nil(bucket) and not is_nil(path) do
-    # Pre-fetch root directory in background without blocking startup
-    if @env != :test do
-      trigger_background_dir_population(pmtiles, server_name, bucket, path, cache_config)
-      Logger.debug("Directory caching enabled (background pre-fetch + on-demand)")
-    else
-      Logger.debug("Directory caching enabled (on-demand fetching only)")
-    end
-
+  # Directory caching enabled with bucket and path (S3), not in test mode - trigger background pre-fetch
+  defp start_background_cache_population(pmtiles, server_name, bucket, path, cache_config, true)
+       when not is_nil(bucket) and not is_nil(path) and @env != :test do
+    trigger_background_dir_population(pmtiles, server_name, bucket, path, cache_config)
+    Logger.debug("Directory caching enabled (background pre-fetch + on-demand)")
     pmtiles
   end
 
-  defp start_background_cache_population(pmtiles, _server_name, _bucket, _path, _cache_configs) do
-    # Bucket or path is nil (e.g., local files), skip pre-fetch
+  # Directory caching enabled with bucket and path (S3), in test mode - on-demand only
+  defp start_background_cache_population(pmtiles, _server_name, bucket, path, _cache_config, true)
+       when not is_nil(bucket) and not is_nil(path) and @env == :test do
+    Logger.debug("Directory caching enabled (on-demand fetching only)")
+    pmtiles
+  end
+
+  # Directory caching enabled but bucket or path is nil (local files) - on-demand only
+  defp start_background_cache_population(
+         pmtiles,
+         _server_name,
+         _bucket,
+         _path,
+         _cache_config,
+         true
+       ) do
     Logger.debug("Directory caching enabled (on-demand fetching)")
+    pmtiles
+  end
+
+  # Directory caching disabled
+  defp start_background_cache_population(
+         pmtiles,
+         _server_name,
+         _bucket,
+         _path,
+         _cache_config,
+         false
+       ) do
+    Logger.debug("Directory caching disabled")
     pmtiles
   end
 

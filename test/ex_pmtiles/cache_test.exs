@@ -6,6 +6,7 @@ defmodule ExPmtiles.CacheTest do
   # Set up expectations to be verified when the test exits
   setup :verify_on_exit!
 
+  alias ExPmtiles
   alias ExPmtiles.Cache
   alias ExPmtiles.CacheMock
 
@@ -14,7 +15,16 @@ defmodule ExPmtiles.CacheTest do
   @max_cache_size 1_000
 
   # Mock the Pmtiles module
-  setup do
+  setup [:start_bypass]
+
+  setup %{bypass: bypass} do
+    # Set up Bypass to handle S3 HEAD requests for file change detection
+    Bypass.stub(bypass, "HEAD", "/#{@bucket}/#{@path}", fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("etag", "\"test-etag-123\"")
+      |> Plug.Conn.resp(200, "")
+    end)
+
     # Clean up any existing process
     case Process.whereis(:cache_one) do
       nil -> :ok
@@ -29,8 +39,10 @@ defmodule ExPmtiles.CacheTest do
     # Add this line to make mocks global
     Mox.set_mox_global()
 
-    stub(CacheMock, :new, fn region, bucket, path, storage ->
-      %{region: region, bucket: bucket, path: path, storage: storage}
+    # Mock returns struct without :storage field to avoid AWS calls
+    # This causes Storage.get_file_metadata to return :unsupported_instance
+    stub(CacheMock, :new, fn region, bucket, path, _storage ->
+      %{region: region, bucket: bucket, path: path}
     end)
 
     stub(CacheMock, :get_zxy, fn pmtiles, z, x, y ->
@@ -640,6 +652,107 @@ defmodule ExPmtiles.CacheTest do
       if Process.whereis(:cache_s3_etag_change) do
         GenServer.stop(:cache_s3_etag_change)
       end
+    end
+
+    test "integration: cache detects file change and clears stale data", %{bypass: bypass} do
+      # Clean up any existing process
+      case Process.whereis(:cache_integration_test) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      # Set up atomic counter for ETag versioning
+      etag_ref = :atomics.new(1, [])
+      :atomics.put(etag_ref, 1, 1)
+
+      # Bypass will return different ETags based on counter
+      Bypass.expect(bypass, "HEAD", "/#{@bucket}/#{@path}", fn conn ->
+        etag_version = :atomics.get(etag_ref, 1)
+
+        etag =
+          case etag_version do
+            1 -> "\"file-version-1\""
+            _ -> "\"file-version-2-changed\""
+          end
+
+        conn
+        |> Plug.Conn.put_resp_header("etag", etag)
+        |> Plug.Conn.resp(200, "")
+      end)
+
+      # Get bypass config
+      config = exaws_config_for_bypass(bypass)
+
+      # Override mock for this test to return instance with :source field
+      expect(CacheMock, :new, fn _region, bucket, path, _storage ->
+        %ExPmtiles{
+          source: :s3,
+          region: "us-east-1",
+          bucket: bucket,
+          path: path,
+          directories: %{},
+          pending_directories: %{}
+        }
+      end)
+
+      # Start cache with:
+      # - Directory caching enabled
+      # - Very short check interval (100ms) so we don't have to wait long
+      # - Bypass config injected for testing
+      {:ok, pid} =
+        Cache.start_link(
+          name: :cache_integration_test,
+          region: "us-east-1",
+          bucket: @bucket,
+          path: @path,
+          enable_dir_cache: true,
+          enable_tile_cache: true,
+          file_check_interval_ms: 100,
+          exaws_config: config
+        )
+
+      # Verify it started
+      assert Process.alive?(pid)
+
+      # Give it a moment to initialize
+      Process.sleep(50)
+
+      # Get cache path to verify files
+      cache_path = GenServer.call(pid, :get_cache_path)
+
+      # Create a fake cached directory file to simulate actual caching
+      dir_cache_dir = Path.join(cache_path, "directories")
+      File.mkdir_p!(dir_cache_dir)
+      fake_dir_file = Path.join(dir_cache_dir, "test_dir_123")
+      File.write!(fake_dir_file, "fake directory data version 1")
+
+      # Create a fake cached tile to simulate actual caching
+      tile_cache_dir = Path.join(cache_path, "tiles")
+      File.mkdir_p!(tile_cache_dir)
+      fake_tile_file = Path.join(tile_cache_dir, "test_tile_456.bin")
+      File.write!(fake_tile_file, "fake tile data version 1")
+
+      # Verify the files exist
+      assert File.exists?(fake_dir_file)
+      assert File.exists?(fake_tile_file)
+
+      # Now simulate file change by updating ETag
+      :atomics.put(etag_ref, 1, 2)
+
+      # Wait for file change detection to trigger (check interval is 100ms)
+      # Add buffer time for processing
+      Process.sleep(250)
+
+      # Verify cache files were cleared
+      refute File.exists?(fake_dir_file), "Directory cache file should be deleted"
+      refute File.exists?(fake_tile_file), "Tile cache file should be deleted"
+
+      # Verify stats were reset
+      stats = Cache.get_stats(pid)
+      assert stats.hits == 0
+      assert stats.misses == 0
+
+      GenServer.stop(pid)
     end
   end
 

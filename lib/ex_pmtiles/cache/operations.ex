@@ -21,12 +21,12 @@ defmodule ExPmtiles.Cache.Operations do
   This function is called in the context of the requesting process (e.g., Phoenix request).
   It does all the work synchronously in the caller's process.
   """
-  def handle_tile_request(pmtiles, tile_id, z, x, y, config, enable_tile_cache) do
-    if enable_tile_cache do
-      handle_cached_tile_request(pmtiles, tile_id, z, x, y, config)
-    else
-      handle_uncached_tile_request(pmtiles, tile_id, z, x, y, config)
-    end
+  def handle_tile_request(pmtiles, tile_id, z, x, y, config, true, enable_dir_cache) do
+    handle_cached_tile_request(pmtiles, tile_id, z, x, y, config, enable_dir_cache)
+  end
+
+  def handle_tile_request(pmtiles, tile_id, z, x, y, config, false, enable_dir_cache) do
+    handle_uncached_tile_request(pmtiles, tile_id, z, x, y, config, enable_dir_cache)
   end
 
   @doc """
@@ -38,10 +38,11 @@ defmodule ExPmtiles.Cache.Operations do
         z,
         x,
         y,
-        %{stats: _stats_table, cache_path: nil} = config
+        %{stats: _stats_table, cache_path: nil} = config,
+        enable_dir_cache
       ) do
     # Caching disabled, fetch directly
-    fetch_tile(pmtiles, tile_id, z, x, y, config, false)
+    fetch_tile(pmtiles, tile_id, z, x, y, config, false, enable_dir_cache)
   end
 
   def handle_cached_tile_request(
@@ -50,7 +51,8 @@ defmodule ExPmtiles.Cache.Operations do
         z,
         x,
         y,
-        %{stats: stats_table, cache_path: cache_path} = config
+        %{stats: stats_table, cache_path: cache_path} = config,
+        enable_dir_cache
       ) do
     tile_file_path = FileHandler.tile_cache_file_path(cache_path, tile_id)
 
@@ -63,19 +65,19 @@ defmodule ExPmtiles.Cache.Operations do
 
         :error ->
           # Failed to read, fetch fresh
-          fetch_tile(pmtiles, tile_id, z, x, y, config, true)
+          fetch_tile(pmtiles, tile_id, z, x, y, config, true, enable_dir_cache)
       end
     else
       # Cache miss - fetch and cache
-      fetch_tile(pmtiles, tile_id, z, x, y, config, true)
+      fetch_tile(pmtiles, tile_id, z, x, y, config, true, enable_dir_cache)
     end
   end
 
   @doc """
   Handles a tile request when tile caching is disabled.
   """
-  def handle_uncached_tile_request(pmtiles, tile_id, z, x, y, config) do
-    fetch_tile(pmtiles, tile_id, z, x, y, config, false)
+  def handle_uncached_tile_request(pmtiles, tile_id, z, x, y, config, enable_dir_cache) do
+    fetch_tile(pmtiles, tile_id, z, x, y, config, false, enable_dir_cache)
   end
 
   @doc """
@@ -83,7 +85,7 @@ defmodule ExPmtiles.Cache.Operations do
 
   This does all the work synchronously in the calling process.
   """
-  def fetch_tile(pmtiles, tile_id, z, x, y, config, enable_tile_cache) do
+  def fetch_tile(pmtiles, tile_id, z, x, y, config, enable_tile_cache, enable_dir_cache) do
     %{
       stats: stats_table,
       cache_path: cache_path,
@@ -93,8 +95,17 @@ defmodule ExPmtiles.Cache.Operations do
     :ets.update_counter(stats_table, :misses, 1)
 
     try do
-      # Fetch tile using file-based directory caching
-      result = fetch_tile_from_pmtiles(pmtiles, z, x, y, cache_path, pending_directories_table)
+      # Fetch tile using file-based directory caching if enabled
+      result =
+        fetch_tile_from_pmtiles(
+          pmtiles,
+          z,
+          x,
+          y,
+          enable_dir_cache,
+          cache_path,
+          pending_directories_table
+        )
 
       case result do
         {nil, _updated_pmtiles} ->
@@ -119,12 +130,21 @@ defmodule ExPmtiles.Cache.Operations do
     end
   end
 
-  defp fetch_tile_from_pmtiles(pmtiles, z, x, y, cache_path, pending_directories_table) do
-    if @env == :test do
-      pmtiles_module().get_zxy(pmtiles, z, x, y)
-    else
-      pmtiles_module().get_zxy(pmtiles, z, x, y, cache_path, pending_directories_table)
-    end
+  defp fetch_tile_from_pmtiles(pmtiles, z, x, y, true, cache_path, pending_directories_table)
+       when @env != :test do
+    pmtiles_module().get_zxy(pmtiles, z, x, y, cache_path, pending_directories_table)
+  end
+
+  defp fetch_tile_from_pmtiles(
+         pmtiles,
+         z,
+         x,
+         y,
+         _enable_dir_cache,
+         _cache_path,
+         _pending_directories_table
+       ) do
+    pmtiles_module().get_zxy(pmtiles, z, x, y)
   end
 
   # Used to get the pmtiles module from the application environment so it can be mocked in tests
