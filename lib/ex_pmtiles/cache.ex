@@ -496,7 +496,7 @@ defmodule ExPmtiles.Cache do
 
   defp handle_metadata_result(state, current_metadata) do
     cond do
-      file_changed?(state, current_metadata) ->
+      file_changed?(state.file_metadata, current_metadata) ->
         handle_file_change(state, current_metadata)
 
       is_nil(state.file_metadata) ->
@@ -507,8 +507,8 @@ defmodule ExPmtiles.Cache do
     end
   end
 
-  defp file_changed?(state, current_metadata) do
-    state.file_metadata && current_metadata != state.file_metadata
+  defp file_changed?(file_metadata, current_metadata) do
+    file_metadata && current_metadata != file_metadata
   end
 
   defp handle_file_change(state, new_metadata) do
@@ -657,12 +657,7 @@ defmodule ExPmtiles.Cache do
       )
     end
 
-    # Only schedule file change detection if caching is enabled
-    if enable_dir_cache or enable_tile_cache do
-      :timer.send_interval(file_check_interval_ms, :check_file_changed)
-
-      Logger.debug("File change detection enabled: check interval #{file_check_interval_ms}ms")
-    end
+    :timer.send_interval(file_check_interval_ms, :check_file_changed)
 
     {:ok,
      %{
