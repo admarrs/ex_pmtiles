@@ -162,7 +162,8 @@ defmodule ExPmtiles.Cache do
     region = Keyword.get(opts, :region)
     bucket = Keyword.get(opts, :bucket)
     path = Keyword.get(opts, :path)
-    storage = Keyword.get(opts, :storage, :s3)
+    # Auto-detect storage type: if bucket is nil, use local storage
+    storage = Keyword.get(opts, :storage, if(is_nil(bucket), do: :local, else: :s3))
     name = Keyword.get(opts, :name, name_for(bucket, path))
     GenServer.start_link(__MODULE__, {region, bucket, path, storage, opts}, name: name)
   end
@@ -555,6 +556,19 @@ defmodule ExPmtiles.Cache do
     file_metadata && current_metadata != file_metadata
   end
 
+  defp reinitialize_pmtiles(pmtiles) do
+    # Fetch the new header from the file (first 16KB contains header)
+    case pmtiles_module().get_bytes(pmtiles, 0, 16_384) do
+      nil ->
+        nil
+
+      data ->
+        header = pmtiles_module().parse_header(data)
+        # Create new pmtiles instance with fresh header and cleared caches
+        %{pmtiles | header: header, directories: %{}, pending_directories: %{}}
+    end
+  end
+
   defp handle_file_change(state, new_metadata) do
     Logger.warning(
       "PMTiles file changed detected for #{state.name}. Old metadata: #{state.file_metadata}, New metadata: #{new_metadata}. Clearing cache..."
@@ -564,8 +578,17 @@ defmodule ExPmtiles.Cache do
     FileHandler.clear_cache_files(state.cache_path)
     reset_stats(state.stats_table)
 
-    # Clear in-memory directories in the pmtiles struct
-    pmtiles = %{state.pmtiles | directories: %{}, pending_directories: %{}}
+    # Re-initialize pmtiles struct to fetch new header from changed file
+    pmtiles =
+      case reinitialize_pmtiles(state.pmtiles) do
+        nil ->
+          Logger.error("Failed to re-initialize PMTiles after file change for #{state.name}")
+          # Fall back to clearing directories only
+          %{state.pmtiles | directories: %{}, pending_directories: %{}}
+
+        new_pmtiles ->
+          new_pmtiles
+      end
 
     # Trigger background directory cache population if conditions are met
     trigger_dir_population_on_file_change(state, pmtiles)
@@ -610,8 +633,12 @@ defmodule ExPmtiles.Cache do
 
   # Private functions
 
-  defp initialize_pmtiles(region, bucket, path, storage) do
-    pmtiles_module().new(region, bucket, path, storage)
+  defp initialize_pmtiles(_region, _bucket, path, :local) do
+    pmtiles_module().new(path, :local)
+  end
+
+  defp initialize_pmtiles(region, bucket, path, :s3) do
+    pmtiles_module().new(region, bucket, path, :s3)
   end
 
   defp reset_stats(stats_table) do

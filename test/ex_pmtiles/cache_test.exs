@@ -41,8 +41,14 @@ defmodule ExPmtiles.CacheTest do
 
     # Mock returns struct without :storage field to avoid AWS calls
     # This causes Storage.get_file_metadata to return :unsupported_instance
+    # S3 version (4 args)
     stub(CacheMock, :new, fn region, bucket, path, _storage ->
       %{region: region, bucket: bucket, path: path}
+    end)
+
+    # Local version (2 args)
+    stub(CacheMock, :new, fn path, :local ->
+      %{bucket: nil, path: path}
     end)
 
     stub(CacheMock, :get_zxy, fn pmtiles, z, x, y ->
@@ -690,9 +696,21 @@ defmodule ExPmtiles.CacheTest do
           region: "us-east-1",
           bucket: bucket,
           path: path,
+          header: %{leaf_dir_offset: 0, root_offset: 0},
           directories: %{},
           pending_directories: %{}
         }
+      end)
+
+      # Mock get_bytes and parse_header for file change re-initialization
+      expect(CacheMock, :get_bytes, fn _pmtiles, 0, 16_384 ->
+        # Return fake header data
+        <<0, 1, 2, 3>>
+      end)
+
+      expect(CacheMock, :parse_header, fn _data ->
+        # Return a fake parsed header
+        %{leaf_dir_offset: 0, root_offset: 0}
       end)
 
       # Start cache with:

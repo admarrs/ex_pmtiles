@@ -14,5 +14,7 @@ defmodule ExPmtiles.Behaviour do
               map()
   @callback zxy_to_tile_id(integer(), integer(), integer()) :: integer()
   @callback tile_id_to_zxy(integer()) :: {integer(), integer(), integer()}
+  @callback get_bytes(map(), integer(), integer()) :: binary() | nil
+  @callback parse_header(binary()) :: map()
   # coveralls-ignore-end
 end
