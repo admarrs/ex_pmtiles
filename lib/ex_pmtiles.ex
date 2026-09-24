@@ -93,8 +93,7 @@ defmodule ExPmtiles do
 
     :hackney_pool.start_pool(:s3_pool, pool_opts)
 
-    # Start a supervisor (even though we don't have children yet, this allows future expansion)
-    children = []
+    children = [{Task.Supervisor, name: ExPmtiles.CacheTaskSupervisor}]
     opts = [strategy: :one_for_one, name: ExPmtiles.Supervisor]
     Supervisor.start_link(children, opts)
   end

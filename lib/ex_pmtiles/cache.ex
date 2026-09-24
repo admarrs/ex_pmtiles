@@ -114,6 +114,7 @@ defmodule ExPmtiles.Cache do
   alias ExPmtiles.Cache.Operations
 
   @table_prefix :pmtiles_cache
+  @metadata_task_supervisor ExPmtiles.CacheTaskSupervisor
 
   @env Mix.env()
   # Client API
@@ -430,8 +431,57 @@ defmodule ExPmtiles.Cache do
   end
 
   @impl true
+  def handle_info(:check_file_changed, %{metadata_task: nil} = state) do
+    case start_metadata_task(state) do
+      {:ok, task} ->
+        {:noreply, %{state | metadata_task: {task.ref, task.pid}}}
+
+      :unavailable ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_info(:check_file_changed, state) do
-    state = check_and_handle_file_change(state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({ref, result}, %{metadata_task: {ref, _pid}} = state) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | metadata_task: nil}
+
+    case result do
+      {:ok, metadata} ->
+        {:noreply, handle_metadata_result(state, metadata)}
+
+      {:error, reason} ->
+        {:noreply, log_metadata_error(state, reason)}
+
+      other ->
+        {:noreply, log_metadata_error(state, {:unexpected_result, other})}
+    end
+  end
+
+  @impl true
+  def handle_info(
+        {:DOWN, ref, :process, pid, reason},
+        %{metadata_task: {ref, pid}} = state
+      ) do
+    Logger.debug(
+      "File metadata check task for #{state.name} exited before returning a result: #{inspect(reason)}"
+    )
+
+    {:noreply, %{state | metadata_task: nil}}
+  end
+
+  @impl true
+  def handle_info({ref, _result}, state) when is_reference(ref) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
     {:noreply, state}
   end
 
@@ -480,18 +530,12 @@ defmodule ExPmtiles.Cache do
       not is_nil(state.path)
   end
 
-  defp check_and_handle_file_change(state) do
-    case ExPmtiles.Storage.get_file_metadata(state.pmtiles, state.exaws_config) do
-      {:ok, current_metadata} ->
-        handle_metadata_result(state, current_metadata)
+  defp log_metadata_error(state, reason) do
+    Logger.debug(
+      "Failed to check file metadata for #{state.name}: #{inspect(reason)}. Skipping file change check."
+    )
 
-      {:error, reason} ->
-        Logger.debug(
-          "Failed to check file metadata for #{state.name}: #{inspect(reason)}. Skipping file change check."
-        )
-
-        state
-    end
+    state
   end
 
   defp handle_metadata_result(state, current_metadata) do
@@ -548,12 +592,6 @@ defmodule ExPmtiles.Cache do
 
       Logger.debug("Triggered background directory cache population after file change detection")
     end
-  end
-
-  @impl true
-  def terminate(_reason, _state) do
-    # File-based cache, no resources to close
-    :ok
   end
 
   # Private functions
@@ -674,8 +712,26 @@ defmodule ExPmtiles.Cache do
        max_cache_age_ms: max_cache_age_ms,
        cache_start_time: System.monotonic_time(:millisecond),
        file_metadata: file_metadata,
-       exaws_config: exaws_config
+       exaws_config: exaws_config,
+       metadata_task: nil
      }}
+  end
+
+  defp start_metadata_task(state) do
+    task =
+      Task.Supervisor.async_nolink(@metadata_task_supervisor, fn ->
+        ExPmtiles.Storage.get_file_metadata(state.pmtiles, state.exaws_config)
+      end)
+
+    {:ok, task}
+  catch
+    :exit, reason ->
+      Logger.debug(
+        "Unable to start file metadata check for #{state.name}: " <>
+          "task supervisor unavailable (#{inspect(reason)})"
+      )
+
+      :unavailable
   end
 
   defp init_cache(table_name, server_name, enable_dir_cache, enable_tile_cache) do
